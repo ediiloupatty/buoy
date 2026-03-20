@@ -1,5 +1,5 @@
 #include <WiFi.h>
-#include <WebServer.h>
+#include <FirebaseESP32.h> // Instal Library: "Firebase ESP32 Client" by Mobizt di Arduino IDE
 #include <Wire.h>
 #include <LiquidCrystal_I2C.h>
 #include <OneWire.h>
@@ -11,11 +11,15 @@
 #define TEMP_PIN 4
 #define TURB_PIN 35
 
-// WIFI
+// Konfigurasi WiFi
 const char* ssid = "No Internet Connection";
-const char* password = "Loupatty143"; // ganti kalau beda
+const char* password = "Loupatty143";
 
-WebServer server(80);
+// Konfigurasi Firebase (Ganti dengan milik Anda)
+#define FIREBASE_HOST "URL_DATABASE_FIREBASE_ANDA.firebaseio.com" // Tanpa https:// dan simbol (/) di akhir
+#define FIREBASE_AUTH "DATABASE_SECRET_FIREBASE_ANDA"             // Ini adalah token rahasia dari setting database
+
+FirebaseData firebaseData;
 
 LiquidCrystal_I2C lcd(0x27, 16, 2);
 
@@ -23,7 +27,7 @@ LiquidCrystal_I2C lcd(0x27, 16, 2);
 OneWire oneWire(TEMP_PIN);
 DallasTemperature sensors(&oneWire);
 
-// kalibrasi pH
+// kalibrasi pH (Tetap tidak diubah)
 float m = -4.79;
 float b = 18.06;
 
@@ -48,31 +52,6 @@ int readTurbidity() {
   return total / 10;
 }
 
-// ===== halaman web =====
-void handleRoot() {
-  float voltage = readVoltage();
-  float phValue = (m * voltage) + b;
-
-  sensors.requestTemperatures();
-  float tempC = sensors.getTempCByIndex(0);
-
-  int turbidity = readTurbidity();
-
-  String kondisi;
-  if (turbidity < 1500) kondisi = "Jernih";
-  else if (turbidity < 3000) kondisi = "Keruh";
-  else kondisi = "Kotor";
-
-  String html = "<html><head><meta http-equiv='refresh' content='2'></head><body>";
-  html += "<h1>Water Monitoring</h1>";
-  html += "<p>pH: " + String(phValue, 2) + "</p>";
-  html += "<p>Temperature: " + String(tempC, 2) + " C</p>";
-  html += "<p>Turbidity: " + String(turbidity) + " (" + kondisi + ")</p>";
-  html += "</body></html>";
-
-  server.send(200, "text/html", html);
-}
-
 void setup() {
   Serial.begin(115200);
 
@@ -87,7 +66,6 @@ void setup() {
   lcd.print("Connecting WiFi");
   
   WiFi.begin(ssid, password);
-
   while (WiFi.status() != WL_CONNECTED) {
     delay(500);
     Serial.print(".");
@@ -98,36 +76,68 @@ void setup() {
 
   lcd.clear();
   lcd.setCursor(0,0);
-  lcd.print("WiFi Connected");
-  lcd.setCursor(0,1);
-  lcd.print(WiFi.localIP());
+  lcd.print("WiFi Connected!!");
+  delay(1000);
 
-  server.on("/", handleRoot);
-  server.begin();
-}
-
-void loop() {
-  server.handleClient();
-
-  // tetap tampil di LCD juga
-  float voltage = readVoltage();
-  float phValue = (m * voltage) + b;
-
-  sensors.requestTemperatures();
-  float tempC = sensors.getTempCByIndex(0);
-
-  int turbidity = readTurbidity();
-
+  // Inisialisasi Firebase
   lcd.clear();
   lcd.setCursor(0,0);
-  lcd.print("pH:");
-  lcd.print(phValue,2);
-
+  lcd.print("Connecting to");
   lcd.setCursor(0,1);
-  lcd.print("T:");
-  lcd.print(tempC,1);
-  lcd.print((char)223);
-  lcd.print("C");
+  lcd.print("Firebase...");
+  
+  Firebase.begin(FIREBASE_HOST, FIREBASE_AUTH);
+  Firebase.reconnectWiFi(true); // Sangat penting agar Firebase menyambung ulang otomatis kalau WiFi putus!
+  
+  delay(1000);
+  lcd.clear();
+}
 
-  delay(2000);
+unsigned long previousMillis = 0;
+const long updateInterval = 2000;
+
+void loop() {
+  unsigned long currentMillis = millis();
+
+  // Eksekusi setiap 2 detik (Baca sensor, Update LCD, & Kirim ke Firebase)
+  if (currentMillis - previousMillis >= updateInterval) {
+    previousMillis = currentMillis;
+
+    // 1. Baca Sensor (Sensors section)
+    float voltage = readVoltage();
+    float phValue = (m * voltage) + b;
+
+    sensors.requestTemperatures();
+    float tempC = sensors.getTempCByIndex(0);
+
+    int turbidity = readTurbidity();
+    String kondisi;
+    if (turbidity < 1500) kondisi = "Jernih";
+    else if (turbidity < 3000) kondisi = "Keruh";
+    else kondisi = "Kotor";
+
+    // 2. Tampil di LCD secara mulus (tanpa berkedip)
+    lcd.setCursor(0,0);
+    lcd.print("pH: ");
+    lcd.print(phValue, 2);
+    lcd.print("      ");
+
+    lcd.setCursor(0,1);
+    lcd.print("T: ");
+    lcd.print(tempC, 1);
+    lcd.print((char)223);
+    lcd.print("C      ");
+
+    // 3. Kirim dan Simpan Data ke Firebase Realtime Database
+    // Data ini akan dikelompokkan ke dalam direktori "/smart_buoy/"
+    Firebase.setFloat(firebaseData, "/smart_buoy/pH", phValue);
+    Firebase.setFloat(firebaseData, "/smart_buoy/suhu", tempC);
+    Firebase.setInt(firebaseData, "/smart_buoy/kekeruhan", turbidity);
+    Firebase.setString(firebaseData, "/smart_buoy/status_kekeruhan", kondisi);
+
+    // Optional: Print logika ke Serial Monitor jika sedang colok laptop
+    Serial.print("pH: "); Serial.print(phValue);
+    Serial.print(" | Suhu: "); Serial.print(tempC);
+    Serial.print(" | Kekeruhan: "); Serial.println(kondisi);
+  }
 }
