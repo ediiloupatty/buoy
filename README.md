@@ -2,6 +2,8 @@
 
 Sebuah sistem pelampung otonom (*smart buoy*) yang dirancang khusus untuk mengapung di tengah tambak udang. Sistem ini dapat memantau kualitas kelayakan air berdasarkan parameter **Suhu**, **pH**, dan **Kekeruhan** air secara otomatis, *real-time*, dan minim intervensi manusia.
 
+![Diagram Sistem](img/Diagram.png)
+
 ## Alur Kerja Sistem (Cara Kerja)
 
 Berbeda dengan sistem pemantauan manual yang memakan waktu atau harus menggunakan prob sensor celup sementara, alat ini dirancang dengan alur kerja mandiri sebagai berikut:
