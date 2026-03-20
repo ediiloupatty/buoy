@@ -25,3 +25,31 @@ Berbeda dengan sistem pemantauan manual yang memakan waktu atau harus menggunaka
 
 6. **Pemantauan Cepat oleh Pengguna Tambak**
    Lewat platform *dashboard* atau layanan pemantauan di layar ponsel/laptop, pemilik tambak dapat sewaktu-waktu mengecek apakah parameter air udangnya sedang optimal atau berada di tahap kritis, sehingga pengguna bisa mengambil penanganan (seperti penggantian air atau penambahan oksigen) jauh lebih responsif.
+
+## Panduan Upload ke ESP32 (Flashing / Compilation)
+
+Bagi pengembang atau pengguna yang ingin melakukan pengisian ulang program (*Flashing*) ke *board* ESP32, ikuti panduan standar (*Best Practice*) berikut:
+
+1. **Persiapan Aplikasi:**
+   - Gunakan **Arduino IDE** (Versi 2.x disarankan).
+   - Pastikan *Board Manager* untuk ESP32 sudah terinstal (Pilih *board* **DOIT ESP32 DEVKIT V1** atau sesuai tipe mikrokontroler yang Anda gunakan).
+
+2. **Daftar Library Wajib (Install via Library Manager):**
+   - `Firebase ESP32 Client` (Oleh Mobizt) - Untuk koneksi database nirkabel.
+   - `LiquidCrystal I2C` (Oleh Frank de Brabander) - Untuk layar perangkat.
+   - `DallasTemperature` (Oleh Miles Burton) & `OneWire` (Oleh Paul Stoffregen) - Untuk membaca sensor suhu.
+
+3. **Inisialisasi Konfigurasi:**
+   - Buka file **`Config.h`** di sisi kiri/tab Arduino IDE Anda. 
+   - Ubah atribut *Network Credentials* (`ssid` dan `password` Wi-Fi anda).
+   - Ubah atribut *Firebase* (`FIREBASE_HOST` & `FIREBASE_AUTH`) menyesuaikan kerahasiaan basis data Anda.
+
+4. **Kompilasi dan Mengunggah (Upload):**
+   - Colokkan kabel Micro-USB/Type-C dari soket ESP32 menuju *port* laptop.
+   - Pilih *Port* (misalnya `COM3` pada Windows atau `/dev/ttyUSB0` pada alat bersistem Linux) pada menu drop-down atas di aplikasi Arduino IDE.
+   - Tekan tanda panah kanan (**Upload**) di pojok kiri atas jendela Arduino IDE.
+   - Tunggu hingga proses *Compiling Sketch* selesai. (Tahap ini akan otomatis menjahit `main.ino`, `Sensors.cpp`, dan `Config.h` menjadi satu keping nyawa file *Binary*).
+   - Jika terminal putih Arduino bagian bawah menunjukkan pesan `Connecting...`, silakan **tahan tombol tekan fisik BOOT** pada komponen ESP32 selama 2-3 detik lalu lepas, sampai keterangan proses persentase pengunggahan (`Writing...`) menembus angka 100%.
+
+5. **Pengecekan Akhir Sistem:** 
+   Bukalah alat *Serial Monitor* (Ikon kaca pembesar / ubah *baud rate* menjadi `115200`) untuk melihat riwayat komunikasi tulisan alat ESP. Perhatikan hingga *board* mencetak pesan `"Connected!"` sebagai pertanda sinyal transmisi berhasil mengudara.
