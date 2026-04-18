@@ -1,20 +1,24 @@
 #ifndef CONFIG_H
 #define CONFIG_H
 
-// ==========================================
-// KONFIGURASI PIN ESP32
-// ==========================================
-#define SDA_PIN 27
-#define SCL_PIN 26
-#define PH_PIN 34
-#define TEMP_PIN 4
-#define TURB_PIN 35
+// =================================================================
+// KONFIGURASI PIN FISIK (TRANSFORMASI KE BOARD LABEL "P")
+// =================================================================
+// Hubungkan kabel data sensor ke label "P" yang sesuai di board Anda.
+// =================================================================
+
+// 1. PIN ANALOG (Gunakan ADC1 agar tidak bentrok dengan Wi-Fi)
+#define PH_PIN   34   // Fisik: Cari label "P34" atau "34"
+#define TURB_PIN 35   // Fisik: Cari label "P35" atau "35"
+
+// 2. PIN DIGITAL (OneWire untuk Suhu)
+#define TEMP_PIN 4    // Fisik: Cari label "P4" atau "4"
 
 // ==========================================
 // KONFIGURASI WIFI
 // ==========================================
-const char* ssid = "No Internet Connection";
-const char* password = "Loupatty143";
+static const char *ssid = "No Internet Connection";
+static const char *password = "Loupatty143";
 
 // ==========================================
 // KONFIGURASI FIREBASE
