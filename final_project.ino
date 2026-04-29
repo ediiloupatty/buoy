@@ -1,6 +1,7 @@
 #include <WiFi.h>
 #include <FirebaseESP32.h>
 #include <WebServer.h> // Library tambahan untuk Web Server
+#include <time.h>      // Library NTP untuk sinkronisasi waktu
 
 // Mengimpor file konfigurasi dan file modul sensor buatan kita sendiri
 #include "Config.h"
@@ -24,6 +25,15 @@ unsigned long lastFirebaseMillis = 0;
 // Interval Konfigurasi
 const unsigned long SENSOR_INTERVAL   = 10000;   // 10 detik — baca sensor & update lokal + Firebase live
 const unsigned long HISTORY_INTERVAL  = 600000;  // 10 menit — simpan log historis ke Firebase
+
+// NTP Konfigurasi (Zona Waktu Indonesia Timur / WIT = UTC+9)
+// Sesuaikan offset jika lokasi berbeda:
+//   WIB  = 7*3600  (UTC+7)
+//   WITA = 8*3600  (UTC+8)
+//   WIT  = 9*3600  (UTC+9)
+const long GMT_OFFSET_SEC    = 9 * 3600; // WIT (Maluku/Papua)
+const int  DAYLIGHT_OFFSET   = 0;        // Indonesia tidak pakai DST
+const char *NTP_SERVER       = "pool.ntp.org";
 
 /**
  * handleRoot: Fungsi untuk menyajikan tampilan Dashboard saat IP ESP32 diakses.
@@ -55,7 +65,15 @@ void handleRoot() {
   html += "  <div class='card'><h3>Kekeruhan</h3><div class='val' style='color:#f39c12;'>" + String(turbidity) + "</div><div class='status-box'>" + kondisi + "</div></div>";
   html += "</div>";
   
-  html += "<p style='color: #7f8c8d; margin-top: 30px;'>Last Update: " + String(millis()/1000) + " seconds since boot</p>";
+  // Tampilkan waktu real dari NTP, bukan hanya detik sejak boot
+  struct tm timeinfo;
+  String timeStr = "Belum tersinkronisasi";
+  if (getLocalTime(&timeinfo)) {
+    char buf[30];
+    strftime(buf, sizeof(buf), "%d %b %Y  %H:%M:%S", &timeinfo);
+    timeStr = String(buf);
+  }
+  html += "<p style='color: #7f8c8d; margin-top: 30px;'>Terakhir: " + timeStr + "</p>";
   html += "</body></html>";
   
   server.send(200, "text/html", html);
@@ -84,7 +102,25 @@ void setup() {
   config.signer.tokens.legacy_token = FIREBASE_AUTH;
   Firebase.begin(&config, &auth);
   
-  // 4. Inisialisasi rute Web Server
+  // 4. Sinkronisasi waktu via NTP (wajib setelah WiFi connected)
+  configTime(GMT_OFFSET_SEC, DAYLIGHT_OFFSET, NTP_SERVER);
+  Serial.print("Sinkronisasi waktu NTP");
+  struct tm timeinfo;
+  int retries = 0;
+  while (!getLocalTime(&timeinfo) && retries < 10) {
+    Serial.print(".");
+    delay(500);
+    retries++;
+  }
+  if (retries < 10) {
+    char buf[30];
+    strftime(buf, sizeof(buf), "%d %b %Y %H:%M:%S", &timeinfo);
+    Serial.printf("\nWaktu: %s\n", buf);
+  } else {
+    Serial.println("\n[NTP] Gagal sinkronisasi — history path akan fallback ke millis.");
+  }
+
+  // 5. Inisialisasi rute Web Server
   server.on("/", handleRoot);
   server.begin();
   Serial.println("Web Server Started!");
@@ -126,18 +162,30 @@ void loop() {
     lastFirebaseMillis = now;
 
     if (Firebase.ready()) {
-      // Buat path unik berdasarkan timestamp: /smart_buoy/history/{millis}
-      String historyPath = "/smart_buoy/history/" + String(now);
+      // Buat path terstruktur berdasarkan tanggal & jam real
+      // Hasil: /smart_buoy/history/2026-04-29/21:10:00
+      struct tm timeinfo;
+      String historyPath;
+
+      if (getLocalTime(&timeinfo)) {
+        char dateBuf[12]; // "2026-04-29"
+        char timeBuf[10]; // "21:10:00"
+        strftime(dateBuf, sizeof(dateBuf), "%Y-%m-%d", &timeinfo);
+        strftime(timeBuf, sizeof(timeBuf), "%H:%M:%S", &timeinfo);
+        historyPath = "/smart_buoy/history/" + String(dateBuf) + "/" + String(timeBuf);
+      } else {
+        // Fallback jika NTP gagal — pakai millis agar data tidak hilang
+        historyPath = "/smart_buoy/history/unknown/" + String(now);
+      }
       
       FirebaseJson json;
       json.set("pH", phValue);
       json.set("suhu", tempC);
       json.set("kekeruhan", turbidity);
-      json.set("status_kekeruhan", kondisi);
       json.set("timestamp/.sv", "timestamp"); // Server timestamp Firebase
       
       Firebase.setJSON(firebaseData, historyPath, json);
-      Serial.println("[History] Log historis tersimpan ke Firebase.");
+      Serial.println("[History] Log tersimpan: " + historyPath);
     } else {
       Serial.println("[Firebase] Gagal mengirim — koneksi belum siap.");
     }

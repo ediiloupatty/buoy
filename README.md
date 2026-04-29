@@ -111,24 +111,42 @@ Data ini **ditimpa** setiap 10 detik. Digunakan untuk tampilan dashboard real-ti
 
 > **Catatan:** Field `status_kekeruhan` tidak dikirim di live data untuk menghemat bandwidth. Hitung di sisi Flutter: `<1500` = Jernih, `<3000` = Keruh, `≥3000` = Kotor.
 
-#### Path `/smart_buoy/history/{timestamp}` — Log Historis (tersimpan tiap 10 menit)
+#### Path `/smart_buoy/history/{tanggal}/{jam}` — Log Historis (tersimpan tiap 10 menit)
 
-Data ini **tidak ditimpa** — setiap 10 menit ditambahkan record baru. Digunakan untuk grafik riwayat dan analisis.
+Data ini **tidak ditimpa** — setiap 10 menit ditambahkan record baru dengan path terstruktur berdasarkan tanggal dan jam (via NTP sync). Digunakan untuk grafik riwayat dan analisis.
+
+**Contoh struktur di Firebase Console:**
+```
+smart_buoy/
+  └── history/
+      ├── 2026-04-29/
+      │   ├── 21:00:00/ → {pH: 7.24, suhu: 28.5, kekeruhan: 1200, timestamp: ...}
+      │   ├── 21:10:00/ → {pH: 7.18, suhu: 28.3, kekeruhan: 1350, timestamp: ...}
+      │   └── 21:20:00/ → {pH: 7.20, suhu: 28.4, kekeruhan: 1280, timestamp: ...}
+      └── 2026-04-30/
+          └── ...
+```
 
 | Field | Tipe | Keterangan |
 |---|---|---|
 | `suhu` | `double` | Suhu air saat itu |
 | `pH` | `double` | Tingkat pH saat itu |
 | `kekeruhan` | `int` | Nilai kekeruhan saat itu |
-| `status_kekeruhan` | `String` | Status: Jernih / Keruh / Kotor |
 | `timestamp` | `long` | Server timestamp Firebase (otomatis) |
 
-> **Catatan:** Path `/history/` otomatis terbuat di Firebase setelah ESP32 berjalan 10 menit pertama.
+> **Catatan:** `status_kekeruhan` tidak disimpan di database — hitung di sisi Flutter: `<1500` = Jernih, `<3000` = Keruh, `≥3000` = Kotor.
 
 ### Contoh Pembacaan Data di Flutter
 
 ```dart
 import 'package:firebase_database/firebase_database.dart';
+
+// ── Helper: Hitung status kekeruhan di sisi client ──
+String getStatusKekeruhan(int kekeruhan) {
+  if (kekeruhan < 1500) return 'Jernih';
+  if (kekeruhan < 3000) return 'Keruh';
+  return 'Kotor';
+}
 
 // ── Dashboard real-time (update tiap 10 detik) ──
 final liveRef = FirebaseDatabase.instance.ref('smart_buoy/live');
@@ -137,13 +155,14 @@ liveRef.onValue.listen((event) {
   double suhu = (data['suhu'] ?? 0).toDouble();
   double ph = (data['pH'] ?? 0).toDouble();
   int kekeruhan = (data['kekeruhan'] ?? 0).toInt();
-  String status = data['status_kekeruhan'] ?? 'N/A';
+  String status = getStatusKekeruhan(kekeruhan); // Dihitung di client
 });
 
-// ── Riwayat data (tersimpan tiap 10 menit) ──
-final historyRef = FirebaseDatabase.instance.ref('smart_buoy/history');
-historyRef.orderByChild('timestamp').limitToLast(50).onValue.listen((event) {
-  // Ambil 50 data terakhir untuk grafik riwayat
+// ── Riwayat data per tanggal ──
+// Ambil semua data untuk tanggal tertentu:
+final todayRef = FirebaseDatabase.instance.ref('smart_buoy/history/2026-04-29');
+todayRef.onValue.listen((event) {
+  // Setiap child key = jam (e.g., "21:00:00", "21:10:00", ...)
 });
 ```
 
