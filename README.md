@@ -95,13 +95,25 @@ Untuk menghubungkan aplikasi Flutter ke Firebase Realtime Database project ini, 
    }
    ```
 
-### Struktur Data di Firebase Realtime Database
+### Struktur Data
 
-Data sensor dikirim oleh ESP32 ke Firebase dengan **2 path** berbeda:
+Data sensor dikirim oleh ESP32 ke **2 database berbeda** sesuai fungsinya:
 
-#### Path `/smart_buoy/live/` — Data Real-Time (update tiap 10 detik)
+```
+ESP32 Smart Buoy
+    │
+    ├──→ Firebase Realtime DB   → Flutter App (dashboard real-time)
+    │    Path: /smart_buoy/live/
+    │    Interval: tiap 10 detik
+    │
+    └──→ Supabase PostgreSQL    → ML Training (tabel, CSV, pandas)
+         Tabel: sensor_readings
+         Interval: tiap 10 menit
+```
 
-Data ini **ditimpa** setiap 10 detik. Digunakan untuk tampilan dashboard real-time.
+#### Firebase `/smart_buoy/live/` — Dashboard Real-Time (tiap 10 detik)
+
+Data ini **ditimpa** setiap 10 detik. Digunakan untuk tampilan dashboard real-time di Flutter.
 
 | Path | Tipe | Contoh | Keterangan |
 |---|---|---|---|
@@ -109,34 +121,38 @@ Data ini **ditimpa** setiap 10 detik. Digunakan untuk tampilan dashboard real-ti
 | `/smart_buoy/live/pH` | `double` | `7.24` | Tingkat keasaman air |
 | `/smart_buoy/live/kekeruhan` | `int` | `1200` | Nilai ADC turbidity sensor |
 
-> **Catatan:** Field `status_kekeruhan` tidak dikirim di live data untuk menghemat bandwidth. Hitung di sisi Flutter: `<1500` = Jernih, `<3000` = Keruh, `≥3000` = Kotor.
+> **Catatan:** Field `status_kekeruhan` tidak dikirim — hitung di sisi Flutter: `<1500` = Jernih, `<3000` = Keruh, `≥3000` = Kotor.
 
-#### Path `/smart_buoy/history/{tanggal}/{jam}` — Log Historis (tersimpan tiap 10 menit)
+#### Supabase `sensor_readings` — Log Historis untuk ML (tiap 10 menit)
 
-Data ini **tidak ditimpa** — setiap 10 menit ditambahkan record baru dengan path terstruktur berdasarkan tanggal dan jam (via NTP sync). Digunakan untuk grafik riwayat dan analisis.
+Data disimpan dalam tabel PostgreSQL yang bisa langsung dipakai untuk Machine Learning training.
 
-**Contoh struktur di Firebase Console:**
+**Buat tabel di Supabase SQL Editor:**
+```sql
+CREATE TABLE sensor_readings (
+    id          BIGSERIAL PRIMARY KEY,
+    tanggal     DATE             NOT NULL,
+    jam         TIME             NOT NULL,
+    suhu        DOUBLE PRECISION,
+    ph          DOUBLE PRECISION,
+    kekeruhan   INTEGER,
+    status      VARCHAR(10),
+    created_at  TIMESTAMPTZ      DEFAULT NOW()
+);
+
+-- Index untuk query per tanggal (performa ML export)
+CREATE INDEX idx_sensor_tanggal ON sensor_readings(tanggal);
 ```
-smart_buoy/
-  └── history/
-      ├── 2026-04-29/
-      │   ├── 21:00:00/ → {pH: 7.24, suhu: 28.5, kekeruhan: 1200, timestamp: ...}
-      │   ├── 21:10:00/ → {pH: 7.18, suhu: 28.3, kekeruhan: 1350, timestamp: ...}
-      │   └── 21:20:00/ → {pH: 7.20, suhu: 28.4, kekeruhan: 1280, timestamp: ...}
-      └── 2026-04-30/
-          └── ...
-```
 
-| Field | Tipe | Keterangan |
-|---|---|---|
-| `suhu` | `double` | Suhu air saat itu |
-| `pH` | `double` | Tingkat pH saat itu |
-| `kekeruhan` | `int` | Nilai kekeruhan saat itu |
-| `timestamp` | `long` | Server timestamp Firebase (otomatis) |
+**Contoh isi tabel di Supabase Dashboard:**
 
-> **Catatan:** `status_kekeruhan` tidak disimpan di database — hitung di sisi Flutter: `<1500` = Jernih, `<3000` = Keruh, `≥3000` = Kotor.
+| id | tanggal | jam | suhu | ph | kekeruhan | status | created_at |
+|---|---|---|---|---|---|---|---|
+| 1 | 2026-04-29 | 21:00:00 | 28.50 | 7.24 | 1200 | Jernih | 2026-04-29T21:00:00Z |
+| 2 | 2026-04-29 | 21:10:00 | 28.30 | 7.18 | 1350 | Jernih | 2026-04-29T21:10:00Z |
+| 3 | 2026-04-29 | 21:20:00 | 28.10 | 7.20 | 2800 | Keruh | 2026-04-29T21:20:00Z |
 
-### Contoh Pembacaan Data di Flutter
+### Contoh Pembacaan Data di Flutter (Real-Time)
 
 ```dart
 import 'package:firebase_database/firebase_database.dart';
@@ -155,15 +171,35 @@ liveRef.onValue.listen((event) {
   double suhu = (data['suhu'] ?? 0).toDouble();
   double ph = (data['pH'] ?? 0).toDouble();
   int kekeruhan = (data['kekeruhan'] ?? 0).toInt();
-  String status = getStatusKekeruhan(kekeruhan); // Dihitung di client
-});
-
-// ── Riwayat data per tanggal ──
-// Ambil semua data untuk tanggal tertentu:
-final todayRef = FirebaseDatabase.instance.ref('smart_buoy/history/2026-04-29');
-todayRef.onValue.listen((event) {
-  // Setiap child key = jam (e.g., "21:00:00", "21:10:00", ...)
+  String status = getStatusKekeruhan(kekeruhan);
 });
 ```
 
-> **⚠️ Catatan Keamanan:** Jangan commit file `google-services.json` (Android) dan `GoogleService-Info.plist` (iOS) ke *public repository*. Tambahkan ke `.gitignore`.
+### Contoh Penggunaan Data untuk ML Training (Python)
+
+```python
+import pandas as pd
+from supabase import create_client
+
+# Koneksi ke Supabase
+supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
+
+# Ambil semua data
+response = supabase.table('sensor_readings').select('*').execute()
+df = pd.DataFrame(response.data)
+
+# Training ML model (contoh: prediksi status air)
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.model_selection import train_test_split
+
+X = df[['suhu', 'ph', 'kekeruhan']]
+y = df['status']
+
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2)
+model = RandomForestClassifier()
+model.fit(X_train, y_train)
+print(f"Akurasi: {model.score(X_test, y_test):.2%}")
+```
+
+> **⚠️ Catatan Keamanan:** Jangan commit file `google-services.json`, `GoogleService-Info.plist`, dan kredensial Supabase ke *public repository*. Tambahkan ke `.gitignore`.
+

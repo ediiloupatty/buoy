@@ -1,7 +1,8 @@
 #include <WiFi.h>
 #include <FirebaseESP32.h>
-#include <WebServer.h> // Library tambahan untuk Web Server
-#include <time.h>      // Library NTP untuk sinkronisasi waktu
+#include <HTTPClient.h>  // Untuk HTTP POST ke Supabase
+#include <WebServer.h>   // Library tambahan untuk Web Server
+#include <time.h>        // Library NTP untuk sinkronisasi waktu
 
 // Mengimpor file konfigurasi dan file modul sensor buatan kita sendiri
 #include "Config.h"
@@ -20,11 +21,11 @@ float tempC = 0;
 int turbidity = 0;
 String kondisi = "";
 unsigned long lastMillis = 0;
-unsigned long lastFirebaseMillis = 0;
+unsigned long lastSupabaseMillis = 0;
 
 // Interval Konfigurasi
 const unsigned long SENSOR_INTERVAL   = 10000;   // 10 detik — baca sensor & update lokal + Firebase live
-const unsigned long HISTORY_INTERVAL  = 600000;  // 10 menit — simpan log historis ke Firebase
+const unsigned long HISTORY_INTERVAL  = 600000;  // 10 menit — simpan log historis ke Supabase
 
 // NTP Konfigurasi (Zona Waktu Indonesia Timur / WIT = UTC+9)
 // Sesuaikan offset jika lokasi berbeda:
@@ -157,37 +158,66 @@ void loop() {
     }
   }
 
-  // ── Timer 2: Setiap 10 MENIT — Simpan log historis di Firebase /history/ ──
-  if (now - lastFirebaseMillis >= HISTORY_INTERVAL) {
-    lastFirebaseMillis = now;
-
-    if (Firebase.ready()) {
-      // Buat path terstruktur berdasarkan tanggal & jam real
-      // Hasil: /smart_buoy/history/2026-04-29/21:10:00
-      struct tm timeinfo;
-      String historyPath;
-
-      if (getLocalTime(&timeinfo)) {
-        char dateBuf[12]; // "2026-04-29"
-        char timeBuf[10]; // "21:10:00"
-        strftime(dateBuf, sizeof(dateBuf), "%Y-%m-%d", &timeinfo);
-        strftime(timeBuf, sizeof(timeBuf), "%H:%M:%S", &timeinfo);
-        historyPath = "/smart_buoy/history/" + String(dateBuf) + "/" + String(timeBuf);
-      } else {
-        // Fallback jika NTP gagal — pakai millis agar data tidak hilang
-        historyPath = "/smart_buoy/history/unknown/" + String(now);
-      }
-      
-      FirebaseJson json;
-      json.set("pH", phValue);
-      json.set("suhu", tempC);
-      json.set("kekeruhan", turbidity);
-      json.set("timestamp/.sv", "timestamp"); // Server timestamp Firebase
-      
-      Firebase.setJSON(firebaseData, historyPath, json);
-      Serial.println("[History] Log tersimpan: " + historyPath);
-    } else {
-      Serial.println("[Firebase] Gagal mengirim — koneksi belum siap.");
-    }
+  // ── Timer 2: Setiap 10 MENIT — Simpan log historis ke Supabase (PostgreSQL) ──
+  // Data ini digunakan untuk ML training oleh tim data science
+  if (now - lastSupabaseMillis >= HISTORY_INTERVAL) {
+    lastSupabaseMillis = now;
+    sendToSupabase();
   }
+}
+
+/**
+ * sendToSupabase: Mengirim data sensor ke tabel PostgreSQL via Supabase REST API.
+ * Tabel target: sensor_readings (tanggal, jam, suhu, ph, kekeruhan, status)
+ * Data ini akan digunakan untuk training model Machine Learning.
+ */
+void sendToSupabase() {
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("[Supabase] WiFi tidak terhubung — skip.");
+    return;
+  }
+
+  // Ambil tanggal & jam dari NTP
+  struct tm timeinfo;
+  String tanggal = "1970-01-01";
+  String jam     = "00:00:00";
+
+  if (getLocalTime(&timeinfo)) {
+    char dateBuf[12];
+    char timeBuf[10];
+    strftime(dateBuf, sizeof(dateBuf), "%Y-%m-%d", &timeinfo);
+    strftime(timeBuf, sizeof(timeBuf), "%H:%M:%S", &timeinfo);
+    tanggal = String(dateBuf);
+    jam     = String(timeBuf);
+  }
+
+  // Buat JSON body untuk Supabase REST API
+  String jsonBody = "{";
+  jsonBody += "\"tanggal\":\"" + tanggal + "\",";
+  jsonBody += "\"jam\":\"" + jam + "\",";
+  jsonBody += "\"suhu\":" + String(tempC, 2) + ",";
+  jsonBody += "\"ph\":" + String(phValue, 2) + ",";
+  jsonBody += "\"kekeruhan\":" + String(turbidity) + ",";
+  jsonBody += "\"status\":\"" + kondisi + "\"";
+  jsonBody += "}";
+
+  // Kirim HTTP POST ke Supabase REST API
+  HTTPClient http;
+  String url = String(SUPABASE_URL) + "/rest/v1/sensor_readings";
+
+  http.begin(url);
+  http.addHeader("Content-Type", "application/json");
+  http.addHeader("apikey", SUPABASE_KEY);
+  http.addHeader("Authorization", "Bearer " + String(SUPABASE_KEY));
+  http.addHeader("Prefer", "return=minimal"); // Hemat bandwidth — tidak perlu response body
+
+  int httpCode = http.POST(jsonBody);
+
+  if (httpCode == 201) {
+    Serial.printf("[Supabase] ✓ Data tersimpan: %s %s\n", tanggal.c_str(), jam.c_str());
+  } else {
+    Serial.printf("[Supabase] ✗ Gagal (HTTP %d): %s\n", httpCode, http.getString().c_str());
+  }
+
+  http.end();
 }

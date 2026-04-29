@@ -21,9 +21,17 @@ static const char *ssid = "No Internet Connection";
 static const char *password = "Loupatty143";
 
 // ==========================================
-// KONFIGURASI FIREBASE
+// KONFIGURASI FIREBASE (untuk Flutter real-time dashboard)
 // ==========================================
 #define FIREBASE_HOST "monitoring-air-tambak-udang-default-rtdb.asia-southeast1.firebasedatabase.app"
 #define FIREBASE_AUTH "hSmmOqNZ5viPULXW6RZtIU3qxtT3a2YHBM331VLW"
+
+// ==========================================
+// KONFIGURASI SUPABASE (untuk tabel PostgreSQL / ML Training)
+// ==========================================
+// Isi setelah buat project di https://supabase.com
+// Dapat di: Project Settings → API → Project URL & anon key
+#define SUPABASE_URL  "https://GANTI_DENGAN_PROJECT_URL.supabase.co"
+#define SUPABASE_KEY  "GANTI_DENGAN_ANON_KEY"
 
 #endif
