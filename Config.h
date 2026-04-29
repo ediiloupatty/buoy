@@ -29,9 +29,8 @@ static const char *password = "Loupatty143";
 // ==========================================
 // KONFIGURASI SUPABASE (untuk tabel PostgreSQL / ML Training)
 // ==========================================
-// Isi setelah buat project di https://supabase.com
-// Dapat di: Project Settings → API → Project URL & anon key
-#define SUPABASE_URL  "https://GANTI_DENGAN_PROJECT_URL.supabase.co"
-#define SUPABASE_KEY  "GANTI_DENGAN_ANON_KEY"
+// Project: Supabase PostgreSQL — tabel sensor_readings
+#define SUPABASE_URL  "https://glksldrpehwhzjwwlepj.supabase.co"
+#define SUPABASE_KEY  "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imdsa3NsZHJwZWh3aHpqd3dsZXBqIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzc0Njg5MDcsImV4cCI6MjA5MzA0NDkwN30.amtlC2MzTz9JvVaECjeca82JzkfZaBvDshjrhtaXAlI"
 
 #endif
