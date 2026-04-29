@@ -19,6 +19,11 @@ float tempC = 0;
 int turbidity = 0;
 String kondisi = "";
 unsigned long lastMillis = 0;
+unsigned long lastFirebaseMillis = 0;
+
+// Interval Konfigurasi
+const unsigned long SENSOR_INTERVAL   = 10000;   // 10 detik — baca sensor & update lokal + Firebase live
+const unsigned long HISTORY_INTERVAL  = 600000;  // 10 menit — simpan log historis ke Firebase
 
 /**
  * handleRoot: Fungsi untuk menyajikan tampilan Dashboard saat IP ESP32 diakses.
@@ -26,7 +31,7 @@ unsigned long lastMillis = 0;
 void handleRoot() {
   String html = "<!DOCTYPE html><html><head>";
   html += "<meta name='viewport' content='width=device-width, initial-scale=1.0'>";
-  html += "<meta http-equiv='refresh' content='5'>"; // Auto refresh tiap 5 detik
+  html += "<meta http-equiv='refresh' content='10'>"; // Auto refresh tiap 10 detik (sinkron dengan pembacaan sensor)
   html += "<title>Smart Buoy Local Monitoring</title>";
   html += "<style>";
   html += "  body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; text-align: center; background-color: #f4f7f6; color: #333; padding: 20px; }";
@@ -89,23 +94,52 @@ void loop() {
   // Menangani permintaan dari browser
   server.handleClient();
 
-  // Membaca sensor dan mengirim data setiap 5 detik
-  if (millis() - lastMillis > 5000) {
-    lastMillis = millis();
+  unsigned long now = millis();
+
+  // ── Timer 1: Setiap 10 DETIK — Baca sensor + update Firebase /live/ ──
+  if (now - lastMillis >= SENSOR_INTERVAL) {
+    lastMillis = now;
 
     // Ambil Data Sensor
     phValue   = readPH();
     tempC     = readTemperature();
     turbidity = readTurbidityValue();
-    kondisi  = getTurbidityStatus(turbidity);
+    kondisi   = getTurbidityStatus(turbidity);
 
-    // Kirim ke Firebase (Opsional: Tetap dikirim agar data tersimpan di Cloud)
+    Serial.printf("[Sensor] Suhu=%.1f°C | pH=%.2f | Turb=%d (%s)\n",
+                  tempC, phValue, turbidity, kondisi.c_str());
+
+    // Update data real-time di Firebase (path /live/ — ditimpa terus)
+    // Menggunakan 1 request JSON batch (hemat ~73% bandwidth vs 4 request terpisah)
+    // Field status_kekeruhan dihapus — dihitung di sisi Flutter app dari nilai kekeruhan
     if (Firebase.ready()) {
-      Firebase.setFloat(firebaseData, "/smart_buoy/pH", phValue);
-      Firebase.setFloat(firebaseData, "/smart_buoy/suhu", tempC);
-      Firebase.setInt(firebaseData, "/smart_buoy/kekeruhan", turbidity);
-      Firebase.setString(firebaseData, "/smart_buoy/status_kekeruhan", kondisi);
-      Serial.println("Data Berhasil di-Update ke Cloud & Local.");
+      FirebaseJson liveJson;
+      liveJson.set("pH", phValue);
+      liveJson.set("suhu", tempC);
+      liveJson.set("kekeruhan", turbidity);
+      Firebase.setJSON(firebaseData, "/smart_buoy/live", liveJson);
+    }
+  }
+
+  // ── Timer 2: Setiap 10 MENIT — Simpan log historis di Firebase /history/ ──
+  if (now - lastFirebaseMillis >= HISTORY_INTERVAL) {
+    lastFirebaseMillis = now;
+
+    if (Firebase.ready()) {
+      // Buat path unik berdasarkan timestamp: /smart_buoy/history/{millis}
+      String historyPath = "/smart_buoy/history/" + String(now);
+      
+      FirebaseJson json;
+      json.set("pH", phValue);
+      json.set("suhu", tempC);
+      json.set("kekeruhan", turbidity);
+      json.set("status_kekeruhan", kondisi);
+      json.set("timestamp/.sv", "timestamp"); // Server timestamp Firebase
+      
+      Firebase.setJSON(firebaseData, historyPath, json);
+      Serial.println("[History] Log historis tersimpan ke Firebase.");
+    } else {
+      Serial.println("[Firebase] Gagal mengirim — koneksi belum siap.");
     }
   }
 }

@@ -2,43 +2,65 @@
 #include "Config.h"
 #include <OneWire.h>
 #include <DallasTemperature.h>
+#include <algorithm> // Required for std::sort
 
 // Setup Sensor Suhu DS18B20
 OneWire oneWire(TEMP_PIN);
 DallasTemperature sensors(&oneWire);
 
-// Variabel Kalibrasi pH (Tetap sesuai standar awal dan kesepakatan)
+// pH Calibration Variables (Linear Equation: y = mx + b)
 const float m = -4.79;
 const float b = 18.06;
 
 void initSensors() {
+  // Use 11dB attenuation for 0-3.3V range on ESP32
   analogSetAttenuation(ADC_11db);
   sensors.begin();
 }
 
-float readPH() {
-  int total = 0;
-  for (int i = 0; i < 20; i++) {
-    total += analogRead(PH_PIN);
-    delay(10);
+/**
+ * Helper function to calculate the Median of an array.
+ * This filters out high/low noise spikes which are common in water sensors.
+ */
+float getMedian(int samples[], int n) {
+  std::sort(samples, samples + n);
+  if (n % 2 == 0) {
+    // Explicit cast to float to prevent integer division warnings
+    return (float)(samples[n / 2 - 1] + samples[n / 2]) / 2.0f;
   }
-  float adc = total / 20.0;
-  float voltage = adc * (3.3 / 4095.0);
+  return (float)samples[n / 2];
+}
+
+float readPH() {
+  int samples[20];
+  for (int i = 0; i < 20; i++) {
+    samples[i] = (int)analogRead(PH_PIN);
+    delay(15); 
+  }
+  
+  float medianAdc = getMedian(samples, 20);
+  float voltage = medianAdc * (3.3f / 4095.0f);
   return (m * voltage) + b;
 }
 
 float readTemperature() {
   sensors.requestTemperatures();
-  return sensors.getTempCByIndex(0);
+  float tempC = sensors.getTempCByIndex(0);
+  
+  // -127.0 is the standard value for DS18B20 disconnection
+  if (tempC <= -126.0f) {
+    return -127.0f; 
+  }
+  return tempC;
 }
 
 int readTurbidityValue() {
-  int total = 0;
-  for (int i = 0; i < 10; i++) {
-    total += analogRead(TURB_PIN);
-    delay(5);
+  int samples[15];
+  for (int i = 0; i < 15; i++) {
+    samples[i] = (int)analogRead(TURB_PIN);
+    delay(10);
   }
-  return total / 10;
+  return (int)getMedian(samples, 15);
 }
 
 String getTurbidityStatus(int turbidityValue) {
@@ -46,3 +68,5 @@ String getTurbidityStatus(int turbidityValue) {
   else if (turbidityValue < 3000) return "Keruh";
   else return "Kotor";
 }
+
+

@@ -23,7 +23,7 @@ static const char *password = "Loupatty143";
 // ==========================================
 // KONFIGURASI FIREBASE
 // ==========================================
-#define FIREBASE_HOST "URL_DATABASE_FIREBASE_ANDA.firebaseio.com"
-#define FIREBASE_AUTH "DATABASE_SECRET_FIREBASE_ANDA"
+#define FIREBASE_HOST "monitoring-air-tambak-udang-default-rtdb.asia-southeast1.firebasedatabase.app"
+#define FIREBASE_AUTH "hSmmOqNZ5viPULXW6RZtIU3qxtT3a2YHBM331VLW"
 
 #endif

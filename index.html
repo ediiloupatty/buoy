@@ -1,0 +1,164 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Dashboard Smart Buoy</title>
+    <!-- Google Fonts -->
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --bg: #f0f4f8;
+            --card: #ffffff;
+            --primary: #2563eb;
+            --temp: #ef4444;
+            --ph: #10b981;
+            --turb: #f59e0b;
+            --text: #1e293b;
+        }
+
+        body {
+            font-family: 'Outfit', sans-serif;
+            background-color: var(--bg);
+            color: var(--text);
+            margin: 0;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            min-height: 100vh;
+            padding: 20px;
+        }
+
+        h1 { margin-bottom: 5px; color: var(--primary); }
+        p.subtitle { margin-top: 0; color: #64748b; margin-bottom: 30px; }
+
+        .container {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+            gap: 20px;
+            width: 100%;
+            max-width: 1000px;
+        }
+
+        .card {
+            background: var(--card);
+            border-radius: 20px;
+            padding: 25px;
+            box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.1);
+            text-align: center;
+            transition: transform 0.2s;
+            position: relative;
+            overflow: hidden;
+        }
+
+        .card:hover { transform: translateY(-5px); }
+
+        .card::before {
+            content: "";
+            position: absolute;
+            top: 0; left: 0; width: 100%; height: 5px;
+        }
+
+        .card.temp::before { background: var(--temp); }
+        .card.ph::before { background: var(--ph); }
+        .card.turb::before { background: var(--turb); }
+
+        .label { font-size: 0.9rem; font-weight: 600; text-transform: uppercase; color: #64748b; }
+        .value { font-size: 3.5rem; font-weight: 600; margin: 15px 0; }
+        .unit { font-size: 1.2rem; color: #94a3b8; }
+        .status { 
+            display: inline-block;
+            padding: 5px 15px;
+            border-radius: 50px;
+            font-size: 0.85rem;
+            font-weight: 600;
+            background: #f1f5f9;
+        }
+
+        #last-update { margin-top: 40px; font-size: 0.8rem; color: #94a3b8; }
+
+        @media (max-width: 600px) {
+            .value { font-size: 2.5rem; }
+        }
+    </style>
+</head>
+<body>
+
+    <h1>Smart Buoy IoT</h1>
+    <p class="subtitle">Monitoring Kualitas Air Tambak Real-time</p>
+
+    <div class="container">
+        <!-- Suhu Card -->
+        <div class="card temp">
+            <div class="label">Suhu Air</div>
+            <div class="value"><span id="val-suhu">--</span><span class="unit">°C</span></div>
+            <div id="status-suhu" class="status">Cek Koneksi...</div>
+        </div>
+
+        <!-- pH Card -->
+        <div class="card ph">
+            <div class="label">Tingkat pH</div>
+            <div class="value"><span id="val-ph">--</span></div>
+            <div id="status-ph" class="status">Cek Koneksi...</div>
+        </div>
+
+        <!-- Kekeruhan Card -->
+        <div class="card turb">
+            <div class="label">Kekeruhan</div>
+            <div class="value"><span id="val-turb">--</span></div>
+            <div id="status-turb" class="status">Memuat...</div>
+        </div>
+    </div>
+
+    <div id="last-update">Menunggu data dari ESP32...</div>
+
+    <!-- Firebase SDK -->
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/12.12.1/firebase-app.js";
+        import { getDatabase, ref, onValue } from "https://www.gstatic.com/firebasejs/12.12.1/firebase-database.js";
+
+        // Firebase Configuration - monitoring-air-tambak-udang
+        const firebaseConfig = {
+            apiKey: "AIzaSyBp4nUNuSrfF1AfEzao19PO0kV0fchSs28",
+            authDomain: "monitoring-air-tambak-udang.firebaseapp.com",
+            databaseURL: "https://monitoring-air-tambak-udang-default-rtdb.asia-southeast1.firebasedatabase.app",
+            projectId: "monitoring-air-tambak-udang",
+            storageBucket: "monitoring-air-tambak-udang.firebasestorage.app",
+            messagingSenderId: "311522675251",
+            appId: "1:311522675251:web:c0bc07986cd4912239f146",
+            measurementId: "G-8259S7KH7K"
+        };
+
+        // Initialize Firebase
+        const app = initializeApp(firebaseConfig);
+        const db = getDatabase(app);
+
+        // Referensi Path di Realtime Database
+        const dataRef = ref(db, 'smart_buoy/live');
+
+        // Listener Real-time
+        onValue(dataRef, (snapshot) => {
+            const data = snapshot.val();
+            if (data) {
+                document.getElementById('val-suhu').innerText = data.suhu ? data.suhu.toFixed(1) : "--";
+                document.getElementById('val-ph').innerText = data.ph ? data.ph.toFixed(2) : "--";
+                document.getElementById('val-turb').innerText = data.kekeruhan || "--";
+                document.getElementById('status-turb').innerText = data.status_kekeruhan || "N/A";
+
+                // Logika Status Sederhana
+                if(data.ph) updateStatus('status-ph', data.ph >= 6.5 && data.ph <= 8.5 ? 'NORMAL' : 'BAHAYA');
+                if(data.suhu) updateStatus('status-suhu', data.suhu >= 25 && data.suhu <= 32 ? 'OPTIMAL' : 'PERLU CEK');
+
+                document.getElementById('last-update').innerText = "Update Terakhir: " + new Date().toLocaleTimeString();
+            }
+        });
+
+        function updateStatus(id, text) {
+            const el = document.getElementById(id);
+            el.innerText = text;
+            el.style.backgroundColor = text === 'NORMAL' || text === 'OPTIMAL' ? '#dcfce7' : '#fee2e2';
+            el.style.color = text === 'NORMAL' || text === 'OPTIMAL' ? '#166534' : '#991b1b';
+        }
+    </script>
+</body>
+</html>
