@@ -1,3 +1,10 @@
+/*
+ * SPDX-License-Identifier: MIT
+ * Copyright (c) 2026 Edi Loupatty
+ *
+ * This file is part of the Smart Buoy IoT System.
+ */
+
 /**
  * @file final_project.ino
  * @brief Core application logic for the Smart Buoy IoT System.
