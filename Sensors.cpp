@@ -18,28 +18,13 @@ void initSensors() {
   sensors.begin();
 }
 
-/**
- * Helper function to calculate the Median of an array.
- * This filters out high/low noise spikes which are common in water sensors.
- */
-float getMedian(int samples[], int n) {
-  std::sort(samples, samples + n);
-  if (n % 2 == 0) {
-    // Explicit cast to float to prevent integer division warnings
-    return (float)(samples[n / 2 - 1] + samples[n / 2]) / 2.0f;
-  }
-  return (float)samples[n / 2];
-}
+
 
 float readPH() {
-  int samples[20];
-  for (int i = 0; i < 20; i++) {
-    samples[i] = (int)analogRead(PH_PIN);
-    delay(15); 
-  }
+  // Baca raw ADC sekali jalan (tanpa smoothing/loop)
+  int rawAdc = analogRead(PH_PIN);
   
-  float medianAdc = getMedian(samples, 20);
-  float voltage = medianAdc * (3.3f / 4095.0f);
+  float voltage = rawAdc * (3.3f / 4095.0f);
   return (m * voltage) + b;
 }
 
@@ -55,12 +40,8 @@ float readTemperature() {
 }
 
 int readTurbidityValue() {
-  int samples[15];
-  for (int i = 0; i < 15; i++) {
-    samples[i] = (int)analogRead(TURB_PIN);
-    delay(10);
-  }
-  return (int)getMedian(samples, 15);
+  // Baca raw ADC sekali jalan (tanpa smoothing/loop)
+  return analogRead(TURB_PIN);
 }
 
 String getTurbidityStatus(int turbidityValue) {

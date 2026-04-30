@@ -1,6 +1,6 @@
 #include <WiFi.h>
 #include <FirebaseESP32.h>
-#include <HTTPClient.h>  // Untuk HTTP POST ke Supabase
+
 #include <WebServer.h>   // Library tambahan untuk Web Server
 #include <time.h>        // Library NTP untuk sinkronisasi waktu
 
@@ -21,7 +21,7 @@ float tempC = 0;
 int turbidity = 0;
 String kondisi = "";
 unsigned long lastMillis = 0;
-unsigned long lastSupabaseMillis = 0;
+unsigned long lastHistoryMillis = 0;
 
 // Interval Konfigurasi
 const unsigned long SENSOR_INTERVAL   = 10000;   // 10 detik — baca sensor & update lokal + Firebase live
@@ -158,22 +158,22 @@ void loop() {
     }
   }
 
-  // ── Timer 2: Setiap 10 MENIT — Simpan log historis ke Supabase (PostgreSQL) ──
-  // Data ini digunakan untuk ML training oleh tim data science
-  if (now - lastSupabaseMillis >= HISTORY_INTERVAL) {
-    lastSupabaseMillis = now;
-    sendToSupabase();
+  // ── Timer 2: Setiap 10 MENIT — Simpan log historis ke Firebase RTDB ──
+  // Data ini digunakan untuk log dan aplikasi mobile
+  if (now - lastHistoryMillis >= HISTORY_INTERVAL) {
+    lastHistoryMillis = now;
+    sendHistoryToFirebase();
   }
 }
 
 /**
- * sendToSupabase: Mengirim data sensor ke tabel PostgreSQL via Supabase REST API.
- * Tabel target: sensor_readings (tanggal, jam, suhu, ph, kekeruhan, status)
- * Data ini akan digunakan untuk training model Machine Learning.
+ * sendHistoryToFirebase: Mengirim data sensor historis ke Firebase RTDB.
+ * Path target: /smart_buoy/history
+ * Data akan ditambahkan (push) bukan ditimpa, sehingga membentuk list.
  */
-void sendToSupabase() {
+void sendHistoryToFirebase() {
   if (WiFi.status() != WL_CONNECTED) {
-    Serial.println("[Supabase] WiFi tidak terhubung — skip.");
+    Serial.println("[Firebase History] WiFi tidak terhubung — skip.");
     return;
   }
 
@@ -181,6 +181,7 @@ void sendToSupabase() {
   struct tm timeinfo;
   String tanggal = "1970-01-01";
   String jam     = "00:00:00";
+  unsigned long timestamp = 0;
 
   if (getLocalTime(&timeinfo)) {
     char dateBuf[12];
@@ -189,35 +190,26 @@ void sendToSupabase() {
     strftime(timeBuf, sizeof(timeBuf), "%H:%M:%S", &timeinfo);
     tanggal = String(dateBuf);
     jam     = String(timeBuf);
+    timestamp = mktime(&timeinfo); // Mendapatkan unix epoch time
   }
 
-  // Buat JSON body untuk Supabase REST API
-  String jsonBody = "{";
-  jsonBody += "\"tanggal\":\"" + tanggal + "\",";
-  jsonBody += "\"jam\":\"" + jam + "\",";
-  jsonBody += "\"suhu\":" + String(tempC, 2) + ",";
-  jsonBody += "\"ph\":" + String(phValue, 2) + ",";
-  jsonBody += "\"kekeruhan\":" + String(turbidity) + ",";
-  jsonBody += "\"status\":\"" + kondisi + "\"";
-  jsonBody += "}";
+  if (Firebase.ready()) {
+    FirebaseJson historyJson;
+    historyJson.set("tanggal", tanggal);
+    historyJson.set("jam", jam);
+    historyJson.set("suhu", tempC);
+    historyJson.set("ph", phValue);
+    historyJson.set("kekeruhan", turbidity);
+    historyJson.set("status", kondisi);
+    historyJson.set("timestamp", timestamp);
 
-  // Kirim HTTP POST ke Supabase REST API
-  HTTPClient http;
-  String url = String(SUPABASE_URL) + "/rest/v1/sensor_readings";
-
-  http.begin(url);
-  http.addHeader("Content-Type", "application/json");
-  http.addHeader("apikey", SUPABASE_KEY);
-  http.addHeader("Authorization", "Bearer " + String(SUPABASE_KEY));
-  http.addHeader("Prefer", "return=minimal"); // Hemat bandwidth — tidak perlu response body
-
-  int httpCode = http.POST(jsonBody);
-
-  if (httpCode == 201) {
-    Serial.printf("[Supabase] ✓ Data tersimpan: %s %s\n", tanggal.c_str(), jam.c_str());
+    // Gunakan pushJSON agar data ditambahkan (membuat ID unik)
+    if (Firebase.pushJSON(firebaseData, "/smart_buoy/history", historyJson)) {
+      Serial.printf("[Firebase History] ✓ Data tersimpan: %s %s\n", tanggal.c_str(), jam.c_str());
+    } else {
+      Serial.printf("[Firebase History] ✗ Gagal: %s\n", firebaseData.errorReason().c_str());
+    }
   } else {
-    Serial.printf("[Supabase] ✗ Gagal (HTTP %d): %s\n", httpCode, http.getString().c_str());
+    Serial.println("[Firebase History] ✗ Firebase belum ready.");
   }
-
-  http.end();
 }

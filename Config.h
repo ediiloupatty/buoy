@@ -26,11 +26,4 @@ static const char *password = "Loupatty143";
 #define FIREBASE_HOST "monitoring-air-tambak-udang-default-rtdb.asia-southeast1.firebasedatabase.app"
 #define FIREBASE_AUTH "hSmmOqNZ5viPULXW6RZtIU3qxtT3a2YHBM331VLW"
 
-// ==========================================
-// KONFIGURASI SUPABASE (untuk tabel PostgreSQL / ML Training)
-// ==========================================
-// Project: Supabase PostgreSQL — tabel sensor_readings
-#define SUPABASE_URL  "https://glksldrpehwhzjwwlepj.supabase.co"
-#define SUPABASE_KEY  "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imdsa3NsZHJwZWh3aHpqd3dsZXBqIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzc0Njg5MDcsImV4cCI6MjA5MzA0NDkwN30.amtlC2MzTz9JvVaECjeca82JzkfZaBvDshjrhtaXAlI"
-
 #endif
