@@ -1,53 +1,60 @@
+/**
+ * @file final_project.ino
+ * @brief Core application logic for the Smart Buoy IoT System.
+ * 
+ * Handles network connectivity, NTP time synchronization, a local diagnostic 
+ * web server, and dual-pipeline Firebase Realtime Database telemetry streams.
+ */
+
 #include <WiFi.h>
 #include <FirebaseESP32.h>
+#include <WebServer.h>   // Diagnostic Local Web Server
+#include <time.h>        // Network Time Protocol (NTP) Client
 
-#include <WebServer.h>   // Library tambahan untuk Web Server
-#include <time.h>        // Library NTP untuk sinkronisasi waktu
-
-// Mengimpor file konfigurasi dan file modul sensor buatan kita sendiri
+// Custom Hardware Modules
 #include "Config.h"
 #include "Sensors.h"
 
-// Objek Web Server di port 80
+// Instantiate HTTP server on port 80
 WebServer server(80);
 
+// Firebase Core Objects
 FirebaseData firebaseData;
 FirebaseAuth auth;
 FirebaseConfig config;
 
-// Variabel global untuk menyimpan data sensor agar bisa ditampilkan di web
+// Global Telemetry State
 float phValue = 0;
 float tempC = 0;
 int turbidity = 0;
 String kondisi = "";
+
+// Scheduling Timers
 unsigned long lastMillis = 0;
 unsigned long lastHistoryMillis = 0;
 
-// Variabel untuk Threshold pengiriman Live
+// Threshold states for bandwidth optimization
 float lastSentPH = -100.0;
 float lastSentTemp = -100.0;
 int lastSentTurb = -100;
 
-// Interval Konfigurasi
-const unsigned long SENSOR_INTERVAL   = 10000;   // 10 detik — baca sensor & update lokal + Firebase live
-const unsigned long HISTORY_INTERVAL  = 600000;  // 10 menit — simpan log historis ke Supabase
+// Operational Intervals
+const unsigned long SENSOR_INTERVAL   = 10000;   ///< 10 Seconds: Poll sensors & push Live data
+const unsigned long HISTORY_INTERVAL  = 600000;  ///< 10 Minutes: Push to historical Time-Series Data Lake
 
-// NTP Konfigurasi (Zona Waktu Indonesia Timur / WIT = UTC+9)
-// Sesuaikan offset jika lokasi berbeda:
-//   WIB  = 7*3600  (UTC+7)
-//   WITA = 8*3600  (UTC+8)
-//   WIT  = 9*3600  (UTC+9)
-const long GMT_OFFSET_SEC    = 9 * 3600; // WIT (Maluku/Papua)
-const int  DAYLIGHT_OFFSET   = 0;        // Indonesia tidak pakai DST
+// NTP Timezone Configuration (WIT: Eastern Indonesia Time = UTC+9)
+const long GMT_OFFSET_SEC    = 9 * 3600; 
+const int  DAYLIGHT_OFFSET   = 0;        
 const char *NTP_SERVER       = "pool.ntp.org";
 
 /**
- * handleRoot: Fungsi untuk menyajikan tampilan Dashboard saat IP ESP32 diakses.
+ * @brief HTTP GET handler for the local diagnostic dashboard.
+ * Serves an auto-refreshing HTML interface containing current telemetry.
  */
 void handleRoot() {
   String html = "<!DOCTYPE html><html><head>";
   html += "<meta name='viewport' content='width=device-width, initial-scale=1.0'>";
-  html += "<meta http-equiv='refresh' content='10'>"; // Auto refresh tiap 10 detik (sinkron dengan pembacaan sensor)
+  html += "<meta http-equiv='refresh' content='10'>"; // Auto-refresh synchronized with SENSOR_INTERVAL
   html += "<title>Smart Buoy Local Monitoring</title>";
   html += "<style>";
   html += "  body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; text-align: center; background-color: #f4f7f6; color: #333; padding: 20px; }";
@@ -63,15 +70,15 @@ void handleRoot() {
   html += "<p>Pemantauan Kualitas Air Langsung dari Alat</p>";
   
   html += "<div class='container'>";
-  // Card Suhu
+  // Temperature Card
   html += "  <div class='card'><h3>Suhu Air</h3><div class='val'>" + String(tempC, 1) + "<span class='unit'>&deg;C</span></div></div>";
-  // Card pH
+  // pH Card
   html += "  <div class='card'><h3>Nilai pH</h3><div class='val' style='color:#27ae60;'>" + String(phValue, 2) + "</div></div>";
-  // Card Kekeruhan
+  // Turbidity Card
   html += "  <div class='card'><h3>Kekeruhan</h3><div class='val' style='color:#f39c12;'>" + String(turbidity) + "</div><div class='status-box'>" + kondisi + "</div></div>";
   html += "</div>";
   
-  // Tampilkan waktu real dari NTP, bukan hanya detik sejak boot
+  // Format current NTP time for the dashboard
   struct tm timeinfo;
   String timeStr = "Belum tersinkronisasi";
   if (getLocalTime(&timeinfo)) {
@@ -85,13 +92,16 @@ void handleRoot() {
   server.send(200, "text/html", html);
 }
 
+/**
+ * @brief System Entry Point. Initializes hardware, networking, and backend services.
+ */
 void setup() {
   Serial.begin(115200);
 
-  // 1. Inisialisasi Sensor
+  // 1. Initialize Hardware Abstraction Layer
   initSensors();
 
-  // 2. Inisialisasi WiFi
+  // 2. Establish Network Connection
   WiFi.begin(ssid, password);
   Serial.print("Connecting to WiFi");
   while (WiFi.status() != WL_CONNECTED) {
@@ -103,12 +113,12 @@ void setup() {
   Serial.print("Akses Monitoring di IP: ");
   Serial.println(WiFi.localIP());
 
-  // 3. Inisialisasi Firebase
+  // 3. Initialize Firebase RTDB Client
   config.host = FIREBASE_HOST;
   config.signer.tokens.legacy_token = FIREBASE_AUTH;
   Firebase.begin(&config, &auth);
   
-  // 4. Sinkronisasi waktu via NTP (wajib setelah WiFi connected)
+  // 4. Synchronize Internal RTC via Network Time Protocol
   configTime(GMT_OFFSET_SEC, DAYLIGHT_OFFSET, NTP_SERVER);
   Serial.print("Sinkronisasi waktu NTP");
   struct tm timeinfo;
@@ -126,23 +136,26 @@ void setup() {
     Serial.println("\n[NTP] Gagal sinkronisasi — history path akan fallback ke millis.");
   }
 
-  // 5. Inisialisasi rute Web Server
+  // 5. Boot Local Web Server
   server.on("/", handleRoot);
   server.begin();
   Serial.println("Web Server Started!");
 }
 
+/**
+ * @brief Main execution loop handling HTTP requests and asynchronous telemetry tasks.
+ */
 void loop() {
-  // Menangani permintaan dari browser
+  // Process incoming local HTTP requests
   server.handleClient();
 
   unsigned long now = millis();
 
-  // ── Timer 1: Setiap 10 DETIK — Baca sensor + update Firebase /live/ ──
+  // ── TASK 1: Live Telemetry Stream (High Frequency) ──
   if (now - lastMillis >= SENSOR_INTERVAL) {
     lastMillis = now;
 
-    // Ambil Data Sensor
+    // Poll Hardware
     phValue   = readPH();
     tempC     = readTemperature();
     turbidity = readTurbidityValue();
@@ -151,10 +164,7 @@ void loop() {
     Serial.printf("[Sensor] Suhu=%.1f°C | pH=%.2f | Turb=%d (%s)\n",
                   tempC, phValue, turbidity, kondisi.c_str());
 
-    // Update data real-time di Firebase (path /live/ — ditimpa terus)
-    // Menggunakan 1 request JSON batch (hemat ~73% bandwidth vs 4 request terpisah)
-    // Field status_kekeruhan dihapus — dihitung di sisi Flutter app dari nilai kekeruhan
-    // Terapkan "Threshold" (Kirim Kalau Berubah Saja) untuk Data Live
+    // Bandwidth Optimization: Only dispatch payload if delta exceeds predefined thresholds
     bool shouldSendLive = false;
     if (abs(phValue - lastSentPH) > 0.05 || abs(tempC - lastSentTemp) > 0.1 || abs(turbidity - lastSentTurb) > 5) {
       shouldSendLive = true;
@@ -162,10 +172,12 @@ void loop() {
 
     if (shouldSendLive && Firebase.ready()) {
       FirebaseJson liveJson;
-      // Pendekkan Nama Kunci JSON
+      // Utilize shortened keys to minimize JSON payload weight
       liveJson.set("pH", phValue);
       liveJson.set("temp", tempC);
       liveJson.set("turb", turbidity);
+      
+      // Overwrite the live node for real-time dashboarding
       if (Firebase.setJSON(firebaseData, "/smart_buoy/live", liveJson)) {
         lastSentPH = phValue;
         lastSentTemp = tempC;
@@ -174,8 +186,7 @@ void loop() {
     }
   }
 
-  // ── Timer 2: Setiap 10 MENIT — Simpan log historis ke Firebase RTDB ──
-  // Data ini digunakan untuk log dan aplikasi mobile
+  // ── TASK 2: Historical Telemetry Stream (Low Frequency) ──
   if (now - lastHistoryMillis >= HISTORY_INTERVAL) {
     lastHistoryMillis = now;
     sendHistoryToFirebase();
@@ -183,9 +194,8 @@ void loop() {
 }
 
 /**
- * sendHistoryToFirebase: Mengirim data sensor historis ke Firebase RTDB.
- * Path target: /smart_buoy/history
- * Data akan ditambahkan (push) bukan ditimpa, sehingga membentuk list.
+ * @brief Dispatches a time-stamped telemetry payload to the historical Data Lake.
+ * Appends data as a new unique node rather than overwriting.
  */
 void sendHistoryToFirebase() {
   if (WiFi.status() != WL_CONNECTED) {
@@ -193,23 +203,23 @@ void sendHistoryToFirebase() {
     return;
   }
 
-  // Ambil waktu dari NTP
+  // Retrieve Unix Epoch from synchronized RTC
   struct tm timeinfo;
   unsigned long timestamp = 0;
 
   if (getLocalTime(&timeinfo)) {
-    timestamp = mktime(&timeinfo); // Mendapatkan unix epoch time
+    timestamp = mktime(&timeinfo);
   }
 
   if (Firebase.ready() && timestamp > 0) {
     FirebaseJson historyJson;
-    // Hapus Data String Redundan & Pendekkan Nama Kunci
+    // Utilize shortened keys; string states are computed client-side
     historyJson.set("temp", tempC);
     historyJson.set("pH", phValue);
     historyJson.set("turb", turbidity);
     historyJson.set("ts", timestamp);
 
-    // Gunakan pushJSON agar data ditambahkan (membuat ID unik)
+    // Push JSON to generate a unique chronological key
     if (Firebase.pushJSON(firebaseData, "/smart_buoy/history", historyJson)) {
       Serial.printf("[Firebase History] ✓ Data tersimpan (ts: %lu)\n", timestamp);
     } else {
