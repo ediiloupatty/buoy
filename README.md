@@ -86,7 +86,7 @@ Demi memastikan komunikasi mesin-ke-mesin (M2M) yang ultra-ringan, pemrosesan te
 ### Langkah Kompilasi
 1. **Kloning Repositori:**
    ```bash
-   git clone https://github.com/ediiloupatty/buoy
+   git clone https://github.com/ediiloupatty/buoy.git
    ```
 2. **Konfigurasi Lingkungan:**
    Buka file `Config.h` dan masukkan kredensial rahasia Anda:
