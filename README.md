@@ -97,109 +97,65 @@ Untuk menghubungkan aplikasi Flutter ke Firebase Realtime Database project ini, 
 
 ### Struktur Data
 
-Data sensor dikirim oleh ESP32 ke **2 database berbeda** sesuai fungsinya:
+Data sensor dikirim oleh ESP32 secara eksklusif ke **Firebase Realtime Database** melalui dua jalur (*path*) berbeda:
 
 ```
 ESP32 Smart Buoy
     │
-    ├──→ Firebase Realtime DB   → Flutter App (dashboard real-time)
-    │    Path: /smart_buoy/live/
-    │    Interval: tiap 10 detik
+    ├──→ /smart_buoy/live/      → Dashboard Real-time (Flutter)
+    │                             Dikirim jika ada perubahan nilai (Threshold)
     │
-    └──→ Supabase PostgreSQL    → ML Training (tabel, CSV, pandas)
-         Tabel: sensor_readings
-         Interval: tiap 10 menit
+    └──→ /smart_buoy/history/   → Riwayat/Tabel History (Flutter)
+                                  Dikirim setiap 10 menit (Log Bertumpuk)
 ```
 
-#### Firebase `/smart_buoy/live/` — Dashboard Real-Time (tiap 10 detik)
+#### 1. Path `/smart_buoy/live/` (Dashboard Real-Time)
 
-Data ini **ditimpa** setiap 10 detik. Digunakan untuk tampilan dashboard real-time di Flutter.
+Data ini **ditimpa** terus-menerus. Untuk menghemat kuota internet (persiapan penggunaan SIM800L), data *Live* menggunakan fitur **Threshold**. ESP32 hanya akan mengirim *payload* jika terjadi perubahan signifikan pada nilai sensor (Suhu > 0.1, pH > 0.05, Kekeruhan > 5).
 
-| Path | Tipe | Contoh | Keterangan |
+| Key | Tipe | Contoh | Keterangan |
 |---|---|---|---|
-| `/smart_buoy/live/suhu` | `double` | `28.5` | Suhu air (°C) |
-| `/smart_buoy/live/pH` | `double` | `7.24` | Tingkat keasaman air |
-| `/smart_buoy/live/kekeruhan` | `int` | `1200` | Nilai ADC turbidity sensor |
+| `temp` | `double` | `28.5` | Suhu air (°C) |
+| `pH` | `double` | `7.24` | Tingkat keasaman air |
+| `turb` | `int` | `1200` | Nilai mentah ADC kekeruhan |
 
-> **Catatan:** Field `status_kekeruhan` tidak dikirim — hitung di sisi Flutter: `<1500` = Jernih, `<3000` = Keruh, `≥3000` = Kotor.
+#### 2. Path `/smart_buoy/history/` (Tabel Riwayat)
 
-#### Supabase `sensor_readings` — Log Historis untuk ML (tiap 10 menit)
+Data ini **ditambahkan (Push)** setiap 10 menit, sehingga otomatis membentuk *List* data dengan *Unique ID*. Data teks yang redundan (tanggal/jam/status) telah dihapus dari ESP32 untuk meringankan beban *payload*.
 
-Data disimpan dalam tabel PostgreSQL yang bisa langsung dipakai untuk Machine Learning training.
+| Key | Tipe | Contoh | Keterangan |
+|---|---|---|---|
+| `temp` | `double` | `28.5` | Suhu air (°C) |
+| `pH` | `double` | `7.24` | Tingkat keasaman air |
+| `turb` | `int` | `1200` | Nilai mentah ADC kekeruhan |
+| `ts` | `int` | `1777468907`| Unix Epoch Timestamp |
 
-**Buat tabel di Supabase SQL Editor:**
-```sql
-CREATE TABLE sensor_readings (
-    id          BIGSERIAL PRIMARY KEY,
-    tanggal     DATE             NOT NULL,
-    jam         TIME             NOT NULL,
-    suhu        DOUBLE PRECISION,
-    ph          DOUBLE PRECISION,
-    kekeruhan   INTEGER,
-    status      VARCHAR(10),
-    created_at  TIMESTAMPTZ      DEFAULT NOW()
-);
+> **Catatan:** Status teks ("Jernih", "Keruh") dan format Jam/Tanggal sengaja **tidak dikirim** dari ESP32 untuk menghemat kuota internet. Aplikasi Flutter harus melakukan konversi mandiri (menghitung status berdasarkan nilai `turb` dan menerjemahkan angka `ts` ke dalam tanggal).
 
--- Index untuk query per tanggal (performa ML export)
-CREATE INDEX idx_sensor_tanggal ON sensor_readings(tanggal);
-```
-
-**Contoh isi tabel di Supabase Dashboard:**
-
-| id | tanggal | jam | suhu | ph | kekeruhan | status | created_at |
-|---|---|---|---|---|---|---|---|
-| 1 | 2026-04-29 | 21:00:00 | 28.50 | 7.24 | 1200 | Jernih | 2026-04-29T21:00:00Z |
-| 2 | 2026-04-29 | 21:10:00 | 28.30 | 7.18 | 1350 | Jernih | 2026-04-29T21:10:00Z |
-| 3 | 2026-04-29 | 21:20:00 | 28.10 | 7.20 | 2800 | Keruh | 2026-04-29T21:20:00Z |
-
-### Contoh Pembacaan Data di Flutter (Real-Time)
+### Contoh Pembacaan Data di Flutter
 
 ```dart
 import 'package:firebase_database/firebase_database.dart';
 
-// ── Helper: Hitung status kekeruhan di sisi client ──
-String getStatusKekeruhan(int kekeruhan) {
-  if (kekeruhan < 1500) return 'Jernih';
-  if (kekeruhan < 3000) return 'Keruh';
+// ── Helper: Hitung status kekeruhan di sisi client (HP) ──
+String getStatusKekeruhan(int turb) {
+  if (turb < 1500) return 'Jernih';
+  if (turb < 3000) return 'Keruh';
   return 'Kotor';
 }
 
-// ── Dashboard real-time (update tiap 10 detik) ──
+// ── Dashboard real-time (Otomatis update jika ada perubahan) ──
 final liveRef = FirebaseDatabase.instance.ref('smart_buoy/live');
 liveRef.onValue.listen((event) {
   final data = event.snapshot.value as Map<dynamic, dynamic>;
-  double suhu = (data['suhu'] ?? 0).toDouble();
+  double temp = (data['temp'] ?? 0).toDouble();
   double ph = (data['pH'] ?? 0).toDouble();
-  int kekeruhan = (data['kekeruhan'] ?? 0).toInt();
-  String status = getStatusKekeruhan(kekeruhan);
+  int turb = (data['turb'] ?? 0).toInt();
+  
+  String status = getStatusKekeruhan(turb);
+  print('Suhu: $temp, pH: $ph, Status: $status');
 });
 ```
 
-### Contoh Penggunaan Data untuk ML Training (Python)
-
-```python
-import pandas as pd
-from supabase import create_client
-
-# Koneksi ke Supabase
-supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
-
-# Ambil semua data
-response = supabase.table('sensor_readings').select('*').execute()
-df = pd.DataFrame(response.data)
-
-# Training ML model (contoh: prediksi status air)
-from sklearn.ensemble import RandomForestClassifier
-from sklearn.model_selection import train_test_split
-
-X = df[['suhu', 'ph', 'kekeruhan']]
-y = df['status']
-
-X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2)
-model = RandomForestClassifier()
-model.fit(X_train, y_train)
-print(f"Akurasi: {model.score(X_test, y_test):.2%}")
-```
-
-> **⚠️ Catatan Keamanan:** Jangan commit file `google-services.json`, `GoogleService-Info.plist`, dan kredensial Supabase ke *public repository*. Tambahkan ke `.gitignore`.
+> **⚠️ Catatan Keamanan:** Jangan commit file `google-services.json` dan `GoogleService-Info.plist` ke *public repository*. Tambahkan ke `.gitignore`.
 
