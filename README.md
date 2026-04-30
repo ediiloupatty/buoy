@@ -1,6 +1,4 @@
 <div align="center">
-  <img src="img/Diagram.png" alt="Smart Buoy Architecture Diagram" width="100%">
-
   # Smart Buoy IoT System 🌊
   **Enterprise-Grade Autonomous Aquaculture Monitoring Platform**
   
@@ -9,6 +7,9 @@
   [![Platform](https://img.shields.io/badge/platform-ESP32-lightgrey.svg)](#)
   [![Database](https://img.shields.io/badge/database-Firebase_RTDB-FFCA28.svg)](#)
   [![Client](https://img.shields.io/badge/client-Flutter-02569B.svg)](#)
+
+  <br />
+  <img src="img/Diagram.png" alt="Smart Buoy Architecture Diagram" width="100%">
 </div>
 
 ---
