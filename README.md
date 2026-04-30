@@ -1,6 +1,6 @@
 <div align="center">
-  # Smart Buoy IoT System 🌊
-  **Platform Pemantauan Akuakultur Otonom Kelas Enterprise**
+  <h1>Smart Buoy IoT System 🌊</h1>
+  <h3>Platform Pemantauan Akuakultur Otonom</h3>
   
   [![Build Status](https://img.shields.io/badge/build-passing-brightgreen.svg)](#)
   [![Firmware](https://img.shields.io/badge/firmware-v1.2.0-blue.svg)](#)
@@ -8,6 +8,7 @@
   [![Database](https://img.shields.io/badge/database-Firebase_RTDB-FFCA28.svg)](#)
   [![Client](https://img.shields.io/badge/client-Flutter-02569B.svg)](#)
 
+  <br />
   <br />
   <img src="img/Diagram.png" alt="Arsitektur Smart Buoy" width="100%">
 </div>
@@ -85,7 +86,7 @@ Demi memastikan komunikasi mesin-ke-mesin (M2M) yang ultra-ringan, pemrosesan te
 ### Langkah Kompilasi
 1. **Kloning Repositori:**
    ```bash
-   git clone https://github.com/organisasi-anda/smart-buoy-iot.git
+   git clone https://github.com/ediiloupatty/buoy
    ```
 2. **Konfigurasi Lingkungan:**
    Buka file `Config.h` dan masukkan kredensial rahasia Anda:
