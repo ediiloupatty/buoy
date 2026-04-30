@@ -49,8 +49,8 @@ int lastSentTurb = -100;
 const unsigned long SENSOR_INTERVAL   = 10000;   ///< 10 Seconds: Poll sensors & push Live data
 const unsigned long HISTORY_INTERVAL  = 600000;  ///< 10 Minutes: Push to historical Time-Series Data Lake
 
-// NTP Timezone Configuration (WIT: Eastern Indonesia Time = UTC+9)
-const long GMT_OFFSET_SEC    = 9 * 3600; 
+// NTP Timezone Configuration (WIB: Western Indonesia Time = UTC+7)
+const long GMT_OFFSET_SEC    = 7 * 3600; 
 const int  DAYLIGHT_OFFSET   = 0;        
 const char *NTP_SERVER       = "pool.ntp.org";
 
