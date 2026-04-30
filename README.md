@@ -1,6 +1,6 @@
 <div align="center">
   # Smart Buoy IoT System 🌊
-  **Enterprise-Grade Autonomous Aquaculture Monitoring Platform**
+  **Platform Pemantauan Akuakultur Otonom Kelas Enterprise**
   
   [![Build Status](https://img.shields.io/badge/build-passing-brightgreen.svg)](#)
   [![Firmware](https://img.shields.io/badge/firmware-v1.2.0-blue.svg)](#)
@@ -9,128 +9,128 @@
   [![Client](https://img.shields.io/badge/client-Flutter-02569B.svg)](#)
 
   <br />
-  <img src="img/Diagram.png" alt="Smart Buoy Architecture Diagram" width="100%">
+  <img src="img/Diagram.png" alt="Arsitektur Smart Buoy" width="100%">
 </div>
 
 ---
 
-## 📖 Executive Summary
-The **Smart Buoy IoT System** is a robust, autonomous aquatic monitoring solution specifically engineered for commercial aquaculture (shrimp/fish farming). By leveraging real-time telemetry and highly optimized NoSQL data streams, it provides farm operators with instantaneous visibility into critical water quality parameters, significantly reducing mortality rates and optimizing harvest yields.
+## 📖 Ringkasan Eksekutif
+**Smart Buoy IoT System** adalah solusi pemantauan perairan otonom yang tangguh, dirancang khusus untuk industri akuakultur komersial (tambak udang dan ikan). Dengan memanfaatkan telemetri *real-time* dan aliran data NoSQL yang sangat optimal, sistem ini memberikan visibilitas instan kepada operator tambak mengenai parameter kualitas air yang krusial, yang secara signifikan dapat menekan tingkat kematian (*mortality rate*) dan mengoptimalkan hasil panen.
 
-## ✨ Key Capabilities
-- **Continuous Telemetry:** 24/7 autonomous monitoring of **Temperature**, **pH**, and **Turbidity**.
-- **Bandwidth-Optimized Protocol:** Implements intelligent threshold-based transmission to reduce payload overhead by up to 80%, crucial for low-bandwidth cellular environments (e.g., SIM800L).
-- **Redundant Power System:** Designed for sustainable deployment utilizing internal Li-Ion batteries coupled with top-mounted solar arrays.
-- **Enterprise Data Architecture:** Fully integrated with Firebase Realtime Database utilizing distinct data pipelines for real-time dashboarding and historical logging.
+## ✨ Fitur Unggulan
+- **Telemetri Berkelanjutan:** Pemantauan otonom 24/7 untuk parameter **Suhu**, **pH**, dan **Kekeruhan Air (Turbidity)**.
+- **Protokol Hemat Bandwidth:** Mengimplementasikan transmisi cerdas berbasis *Threshold* (Ambang Batas) yang mampu memangkas beban data hingga 80%, sangat ideal untuk lingkungan jaringan seluler berkecepatan rendah (seperti modul SIM800L).
+- **Sistem Daya Redundan:** Dirancang untuk operasi jangka panjang (*sustainable deployment*) menggunakan kombinasi baterai internal Li-Ion dan panel surya atap.
+- **Arsitektur Data Skala Industri:** Terintegrasi penuh dengan Firebase Realtime Database menggunakan dua jalur pipa data (*data pipelines*) terpisah untuk visualisasi *real-time* dan pencatatan riwayat historis.
 
 ---
 
-## 🏗️ System Architecture
+## 🏗️ Arsitektur Sistem
 
-### Telemetry Pipeline
-The firmware is designed to aggressively minimize MCU workloads and network payloads. Data is dispatched exclusively to **Firebase Realtime Database** via two discrete logical paths:
+### Alur Telemetri
+*Firmware* dirancang secara agresif untuk meminimalkan beban kerja mikrokontroler (MCU) dan ukuran *payload* jaringan. Data didistribusikan secara eksklusif ke **Firebase Realtime Database** melalui dua jalur logis:
 
 ```text
-[ Smart Buoy (ESP32 Node) ]
+[ Node Smart Buoy (ESP32) ]
     │
-    ├──→ /smart_buoy/live/      [ Real-Time Stream ]
-    │                             ▸ Trigger: Threshold Delta (temp>0.1, pH>0.05, turb>5)
-    │                             ▸ Target: Instantaneous mobile dashboard synchronization
+    ├──→ /smart_buoy/live/      [ Aliran Real-Time ]
+    │                             ▸ Pemicu: Pergeseran Nilai (Suhu>0.1, pH>0.05, Kekeruhan>5)
+    │                             ▸ Target: Sinkronisasi instan pada dashboard aplikasi mobile
     │
     └──→ /smart_buoy/history/   [ Time-Series Data Lake ]
-                                  ▸ Trigger: 10-minute Cron Interval
-                                  ▸ Target: Historical trend analysis & charting
+                                  ▸ Pemicu: Interval Waktu Cron (Tiap 10 Menit)
+                                  ▸ Target: Analisis tren historis dan pembuatan grafik
 ```
 
-### Payload Specifications
-To ensure ultra-lightweight M2M (Machine-to-Machine) communication, string formatting is deferred to the client application.
+### Spesifikasi *Payload* Data
+Demi memastikan komunikasi mesin-ke-mesin (M2M) yang ultra-ringan, pemrosesan teks dan logika kualitatif dialihkan sepenuhnya ke sisi aplikasi (*client-side*).
 
-**1. Live Node (`/smart_buoy/live/`)**
-| Key | Type | Description |
-|---|---|---|
-| `temp` | `double` | Water Temperature (°C) |
-| `pH` | `double` | Acidity Level (pH) |
-| `turb` | `int` | Raw Turbidity ADC Value |
+**1. Node Live (`/smart_buoy/live/`)**
+| Kunci (Key) | Tipe Data | Deskripsi |
+|:---:|:---:|---|
+| `temp` | `double` | Suhu Air (°C) |
+| `pH` | `double` | Tingkat Keasaman (pH) |
+| `turb` | `int` | Nilai Mentah ADC Sensor Kekeruhan |
 
-**2. History Node (`/smart_buoy/history/`)**
-| Key | Type | Description |
-|---|---|---|
-| `temp` | `double` | Water Temperature (°C) |
-| `pH` | `double` | Acidity Level (pH) |
-| `turb` | `int` | Raw Turbidity ADC Value |
-| `ts` | `int` | Unix Epoch Timestamp |
+**2. Node History (`/smart_buoy/history/`)**
+| Kunci (Key) | Tipe Data | Deskripsi |
+|:---:|:---:|---|
+| `temp` | `double` | Suhu Air (°C) |
+| `pH` | `double` | Tingkat Keasaman (pH) |
+| `turb` | `int` | Nilai Mentah ADC Sensor Kekeruhan |
+| `ts` | `int` | Stempel Waktu (Unix Epoch Timestamp) |
 
-> **Note:** Qualitative status strings (e.g., "Clear", "Dirty") are omitted from the payload to conserve bandwidth. Client applications must compute states dynamically.
-
----
-
-## 🛠️ Hardware Requirements
-- **MCU:** DOIT ESP32 DevKit V1
-- **Sensors:** Analog pH Sensor, DS18B20 Waterproof Temperature Sensor, Analog Turbidity Sensor
-- **Power:** TP4056 Charge Module, 18650 Li-Ion Battery, 5V Solar Panel
-- *(Future Roadmap)* **Connectivity:** SIM800L v2 GSM Module
+> **Catatan Arsitektur:** Teks status kualitatif (misal: "Jernih", "Kotor") dan format waktu jam/tanggal sengaja tidak disertakan dari alat untuk menghemat kuota transmisi. Aplikasi *client* wajib menghitung dan menerjemahkan status ini secara dinamis.
 
 ---
 
-## 💻 Firmware Installation & Configuration
+## 🛠️ Kebutuhan Perangkat Keras
+- **MCU Utama:** DOIT ESP32 DevKit V1
+- **Sensor:** Sensor pH Analog, Sensor Suhu Tahan Air DS18B20, Sensor Kekeruhan Analog
+- **Modul Daya:** Modul Cas TP4056, Baterai Li-Ion 18650, Panel Surya 5V
+- **Konektivitas (Rencana Mendatang):** Modul GSM SIM800L v2
 
-### Prerequisites
-- **Arduino IDE 2.x** or PlatformIO.
-- **ESP32 Core** installed via Board Manager.
-- Required Libraries:
-  - `Firebase ESP32 Client` by Mobizt
-  - `DallasTemperature` by Miles Burton
-  - `OneWire` by Paul Stoffregen
+---
 
-### Build Instructions
-1. **Clone the Repository:**
+## 💻 Panduan Instalasi *Firmware*
+
+### Persyaratan Sistem
+- **Arduino IDE 2.x** atau PlatformIO.
+- **ESP32 Core** terinstal melalui *Board Manager*.
+- Pustaka (Library) yang diwajibkan:
+  - `Firebase ESP32 Client` (Oleh Mobizt)
+  - `DallasTemperature` (Oleh Miles Burton)
+  - `OneWire` (Oleh Paul Stoffregen)
+
+### Langkah Kompilasi
+1. **Kloning Repositori:**
    ```bash
-   git clone https://github.com/your-org/smart-buoy-iot.git
+   git clone https://github.com/organisasi-anda/smart-buoy-iot.git
    ```
-2. **Environment Configuration:**
-   Navigate to `Config.h` and provision your secure credentials:
+2. **Konfigurasi Lingkungan:**
+   Buka file `Config.h` dan masukkan kredensial rahasia Anda:
    ```c
-   // Network Configuration
-   static const char *ssid = "YOUR_WIFI_SSID";
-   static const char *password = "YOUR_WIFI_PASSWORD";
+   // Konfigurasi Jaringan Lokal
+   static const char *ssid = "NAMA_WIFI_ANDA";
+   static const char *password = "PASSWORD_WIFI_ANDA";
 
-   // Firebase Configuration
-   #define FIREBASE_HOST "your-project-id-default-rtdb.region.firebasedatabase.app"
-   #define FIREBASE_AUTH "your_database_secret"
+   // Konfigurasi Firebase Enterprise
+   #define FIREBASE_HOST "id-proyek-anda.region.firebasedatabase.app"
+   #define FIREBASE_AUTH "kunci_rahasia_database_anda"
    ```
-3. **Compile & Flash:** Select **DOIT ESP32 DEVKIT V1** and execute the upload sequence. Hold the `BOOT` button if the terminal halts at `Connecting...`.
+3. **Kompilasi & Flash:** Pilih papan **DOIT ESP32 DEVKIT V1** dan jalankan urutan unggah (*upload*). Tahan tombol fisik `BOOT` pada ESP32 apabila terminal terhenti pada pesan `Connecting...`.
 
 ---
 
-## 📱 Mobile Client Integration (Flutter)
+## 📱 Integrasi Aplikasi Mobile (Flutter)
 
-The accompanying mobile application acts as the operations center.
+Aplikasi mobile pendamping bertindak sebagai pusat komando operasi (*Operations Center*).
 
-### 1. Initialization
-Bind the client to Firebase using the FlutterFire CLI:
+### 1. Inisialisasi Klien
+Ikat aplikasi klien ke Firebase menggunakan *FlutterFire CLI*:
 ```bash
-flutterfire configure --project=your-firebase-project-id
+flutterfire configure --project=id-proyek-firebase-anda
 flutter pub add firebase_core firebase_database
 ```
 
-### 2. Client-Side Data Handling
-To adhere to the lightweight payload architecture, the client is responsible for data transformation:
+### 2. Penanganan Data Sisi Klien (*Client-Side*)
+Untuk mematuhi arsitektur *payload* yang ringan, klien bertanggung jawab penuh atas transformasi dan penghalusan data:
 
 ```dart
 import 'package:firebase_database/firebase_database.dart';
 
-class WaterQualityService {
+class LayananKualitasAir {
   final DatabaseReference _liveRef = FirebaseDatabase.instance.ref('smart_buoy/live');
 
-  // Business Logic: Compute qualitative state from raw telemetry
-  String computeTurbidityState(int rawTurbidity) {
-    if (rawTurbidity < 1500) return 'Jernih (Clear)';
-    if (rawTurbidity < 3000) return 'Keruh (Cloudy)';
-    return 'Kotor (Critical)';
+  // Logika Bisnis: Menghitung status kualitatif dari telemetri mentah
+  String hitungStatusKekeruhan(int turbMentah) {
+    if (turbMentah < 1500) return 'Jernih (Clear)';
+    if (turbMentah < 3000) return 'Keruh (Cloudy)';
+    return 'Kritis / Kotor (Dirty)';
   }
 
-  // Real-time telemetry subscription
-  void subscribeToTelemetry() {
+  // Berlangganan (Subscribe) ke pembaruan telemetri real-time
+  void mulaiPantauTelemetri() {
     _liveRef.onValue.listen((event) {
       if (event.snapshot.value == null) return;
       
@@ -139,17 +139,17 @@ class WaterQualityService {
       final double ph = (payload['pH'] ?? 0).toDouble();
       final int turb = (payload['turb'] ?? 0).toInt();
       
-      final String status = computeTurbidityState(turb);
+      final String status = hitungStatusKekeruhan(turb);
       
-      print('Telemetry Update -> Temp: $temp°C | pH: $ph | Status: $status');
+      print('Update Telemetri -> Suhu: $temp°C | pH: $ph | Status: $status');
     });
   }
 }
 ```
 
-> **Security Advisory:** Never commit `.env`, `google-services.json`, or `GoogleService-Info.plist` to version control. Strict IAM rules must be enforced on the Firebase console for production deployments.
+> **🛡️ Peringatan Keamanan:** Dilarang keras meng-*commit* file konfigurasi seperti `.env`, `google-services.json`, atau `GoogleService-Info.plist` ke sistem kontrol versi (*Version Control*). Aturan IAM dan Firebase Rules yang ketat wajib diterapkan untuk penempatan produksi (Production Deployment).
 
 ---
 <div align="center">
-  <p>© 2026 Smart Buoy Systems. All Rights Reserved.</p>
+  <p>© 2026 Smart Buoy Systems. Hak Cipta Dilindungi Undang-Undang.</p>
 </div>
