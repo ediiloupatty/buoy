@@ -148,7 +148,7 @@ class LayananKualitasAir {
 }
 ```
 
-> **🛡️ Peringatan Keamanan:** Dilarang keras meng-*commit* file konfigurasi seperti `.env`, `google-services.json`, atau `GoogleService-Info.plist` ke sistem kontrol versi (*Version Control*). Aturan IAM dan Firebase Rules yang ketat wajib diterapkan untuk penempatan produksi (Production Deployment).
+> **🛡️ Security Advisory:** Strictly do not commit configuration files such as `.env`, `google-services.json`, or `GoogleService-Info.plist` to version control. Strict IAM policies and Firebase Rules must be enforced for production deployments.
 
 ---
 <div align="center">
