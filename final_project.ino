@@ -23,6 +23,11 @@ String kondisi = "";
 unsigned long lastMillis = 0;
 unsigned long lastHistoryMillis = 0;
 
+// Variabel untuk Threshold pengiriman Live
+float lastSentPH = -100.0;
+float lastSentTemp = -100.0;
+int lastSentTurb = -100;
+
 // Interval Konfigurasi
 const unsigned long SENSOR_INTERVAL   = 10000;   // 10 detik — baca sensor & update lokal + Firebase live
 const unsigned long HISTORY_INTERVAL  = 600000;  // 10 menit — simpan log historis ke Supabase
@@ -149,12 +154,23 @@ void loop() {
     // Update data real-time di Firebase (path /live/ — ditimpa terus)
     // Menggunakan 1 request JSON batch (hemat ~73% bandwidth vs 4 request terpisah)
     // Field status_kekeruhan dihapus — dihitung di sisi Flutter app dari nilai kekeruhan
-    if (Firebase.ready()) {
+    // Terapkan "Threshold" (Kirim Kalau Berubah Saja) untuk Data Live
+    bool shouldSendLive = false;
+    if (abs(phValue - lastSentPH) > 0.05 || abs(tempC - lastSentTemp) > 0.1 || abs(turbidity - lastSentTurb) > 5) {
+      shouldSendLive = true;
+    }
+
+    if (shouldSendLive && Firebase.ready()) {
       FirebaseJson liveJson;
+      // Pendekkan Nama Kunci JSON
       liveJson.set("pH", phValue);
-      liveJson.set("suhu", tempC);
-      liveJson.set("kekeruhan", turbidity);
-      Firebase.setJSON(firebaseData, "/smart_buoy/live", liveJson);
+      liveJson.set("temp", tempC);
+      liveJson.set("turb", turbidity);
+      if (Firebase.setJSON(firebaseData, "/smart_buoy/live", liveJson)) {
+        lastSentPH = phValue;
+        lastSentTemp = tempC;
+        lastSentTurb = turbidity;
+      }
     }
   }
 
@@ -177,39 +193,29 @@ void sendHistoryToFirebase() {
     return;
   }
 
-  // Ambil tanggal & jam dari NTP
+  // Ambil waktu dari NTP
   struct tm timeinfo;
-  String tanggal = "1970-01-01";
-  String jam     = "00:00:00";
   unsigned long timestamp = 0;
 
   if (getLocalTime(&timeinfo)) {
-    char dateBuf[12];
-    char timeBuf[10];
-    strftime(dateBuf, sizeof(dateBuf), "%Y-%m-%d", &timeinfo);
-    strftime(timeBuf, sizeof(timeBuf), "%H:%M:%S", &timeinfo);
-    tanggal = String(dateBuf);
-    jam     = String(timeBuf);
     timestamp = mktime(&timeinfo); // Mendapatkan unix epoch time
   }
 
-  if (Firebase.ready()) {
+  if (Firebase.ready() && timestamp > 0) {
     FirebaseJson historyJson;
-    historyJson.set("tanggal", tanggal);
-    historyJson.set("jam", jam);
-    historyJson.set("suhu", tempC);
-    historyJson.set("ph", phValue);
-    historyJson.set("kekeruhan", turbidity);
-    historyJson.set("status", kondisi);
-    historyJson.set("timestamp", timestamp);
+    // Hapus Data String Redundan & Pendekkan Nama Kunci
+    historyJson.set("temp", tempC);
+    historyJson.set("pH", phValue);
+    historyJson.set("turb", turbidity);
+    historyJson.set("ts", timestamp);
 
     // Gunakan pushJSON agar data ditambahkan (membuat ID unik)
     if (Firebase.pushJSON(firebaseData, "/smart_buoy/history", historyJson)) {
-      Serial.printf("[Firebase History] ✓ Data tersimpan: %s %s\n", tanggal.c_str(), jam.c_str());
+      Serial.printf("[Firebase History] ✓ Data tersimpan (ts: %lu)\n", timestamp);
     } else {
       Serial.printf("[Firebase History] ✗ Gagal: %s\n", firebaseData.errorReason().c_str());
     }
   } else {
-    Serial.println("[Firebase History] ✗ Firebase belum ready.");
+    Serial.println("[Firebase History] ✗ Firebase belum ready atau waktu belum sinkron.");
   }
 }
