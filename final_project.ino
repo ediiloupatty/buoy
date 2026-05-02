@@ -9,237 +9,546 @@
  * @file final_project.ino
  * @brief Core application logic for the Smart Buoy IoT System.
  * 
- * Handles network connectivity, NTP time synchronization, a local diagnostic 
- * web server, and dual-pipeline Firebase Realtime Database telemetry streams.
+ * Handles SIM800L GPRS connectivity, NTP-less timestamping via network time,
+ * deep sleep power management, and dual-pipeline Firebase REST API telemetry.
+ * 
+ * Execution Model:
+ *   - ESP32 wakes from deep sleep every 2 minutes
+ *   - Reads all sensors
+ *   - Sends live data to Firebase via SIM800L HTTPS PUT
+ *   - Every 5th boot (~10 minutes), also pushes historical data via HTTPS POST
+ *   - Returns to deep sleep
+ * 
+ * Calibration Mode:
+ *   - At boot, firmware waits 5 seconds for serial input
+ *   - If CAL4/CAL7/CALSAVE/CALINFO is received, enters calibration mode
+ *   - Type EXIT to leave calibration mode and resume normal operation
  */
 
-#include <WiFi.h>
-#include <FirebaseESP32.h>
-#include <WebServer.h>   // Diagnostic Local Web Server
-#include <time.h>        // Network Time Protocol (NTP) Client
+#include <time.h>
+#include <HardwareSerial.h>
 
 // Custom Hardware Modules
 #include "Config.h"
 #include "Sensors.h"
 
-// Instantiate HTTP server on port 80
-WebServer server(80);
+// SIM800L Serial (UART2)
+HardwareSerial sim800(2);
 
-// Firebase Core Objects
-FirebaseData firebaseData;
-FirebaseAuth auth;
-FirebaseConfig config;
+// ── RTC Memory: Survives deep sleep ──────────────────────────────────────────
+RTC_DATA_ATTR int   bootCount = 0;          ///< Tracks number of wake cycles
+RTC_DATA_ATTR float lastSentPH   = -100.0;  ///< Last pH value sent to Firebase
+RTC_DATA_ATTR float lastSentTemp = -100.0;  ///< Last temperature sent to Firebase
+RTC_DATA_ATTR int   lastSentTurb = -100;    ///< Last turbidity sent to Firebase
 
-// Global Telemetry State
-float phValue = 0;
-float tempC = 0;
-int turbidity = 0;
-String kondisi = "";
+// Global Telemetry State (current reading)
+float  phValue   = 0;
+float  tempC     = 0;
+int    turbidity = 0;
+String kondisi   = "";
 
-// Scheduling Timers
-unsigned long lastMillis = 0;
-unsigned long lastHistoryMillis = 0;
+// ── Forward Declarations ─────────────────────────────────────────────────────
+bool   initSIM800L();
+bool   openGPRS();
+void   closeGPRS();
+bool   sendFirebasePUT(const String &path, const String &json);
+bool   sendFirebasePOST(const String &path, const String &json);
+String sendAT(const String &cmd, unsigned long timeoutMs = 2000);
+bool   waitForResponse(const String &expected, unsigned long timeoutMs = 2000);
+void   enterDeepSleep();
+bool   checkCalibrationMode();
+unsigned long getNetworkTimestamp();
 
-// Threshold states for bandwidth optimization
-float lastSentPH = -100.0;
-float lastSentTemp = -100.0;
-int lastSentTurb = -100;
-
-// Operational Intervals
-const unsigned long SENSOR_INTERVAL   = 10000;   ///< 10 Seconds: Poll sensors & push Live data
-const unsigned long HISTORY_INTERVAL  = 600000;  ///< 10 Minutes: Push to historical Time-Series Data Lake
-
-// NTP Timezone Configuration (WIT: Eastern Indonesia Time = UTC+9)
-const long GMT_OFFSET_SEC    = 9 * 3600; 
-const int  DAYLIGHT_OFFSET   = 0;        
-const char *NTP_SERVER       = "pool.ntp.org";
-
-/**
- * @brief HTTP GET handler for the local diagnostic dashboard.
- * Serves an auto-refreshing HTML interface containing current telemetry.
- */
-void handleRoot() {
-  String html = "<!DOCTYPE html><html><head>";
-  html += "<meta name='viewport' content='width=device-width, initial-scale=1.0'>";
-  html += "<meta http-equiv='refresh' content='10'>"; // Auto-refresh synchronized with SENSOR_INTERVAL
-  html += "<title>Smart Buoy Local Monitoring</title>";
-  html += "<style>";
-  html += "  body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; text-align: center; background-color: #f4f7f6; color: #333; padding: 20px; }";
-  html += "  .container { display: flex; flex-wrap: wrap; justify-content: center; gap: 20px; }";
-  html += "  .card { background: white; border-radius: 12px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); padding: 20px; width: 250px; }";
-  html += "  h1 { color: #2c3e50; }";
-  html += "  .val { font-size: 2.5em; font-weight: bold; color: #3498db; }";
-  html += "  .unit { font-size: 0.5em; }";
-  html += "  .status-box { margin-top: 10px; font-weight: bold; color: #e67e22; }";
-  html += "</style></head><body>";
-  
-  html += "<h1>Smart Buoy Local Monitor</h1>";
-  html += "<p>Pemantauan Kualitas Air Langsung dari Alat</p>";
-  
-  html += "<div class='container'>";
-  // Temperature Card
-  html += "  <div class='card'><h3>Suhu Air</h3><div class='val'>" + String(tempC, 1) + "<span class='unit'>&deg;C</span></div></div>";
-  // pH Card
-  html += "  <div class='card'><h3>Nilai pH</h3><div class='val' style='color:#27ae60;'>" + String(phValue, 2) + "</div></div>";
-  // Turbidity Card
-  html += "  <div class='card'><h3>Kekeruhan</h3><div class='val' style='color:#f39c12;'>" + String(turbidity) + "</div><div class='status-box'>" + kondisi + "</div></div>";
-  html += "</div>";
-  
-  // Format current NTP time for the dashboard
-  struct tm timeinfo;
-  String timeStr = "Belum tersinkronisasi";
-  if (getLocalTime(&timeinfo)) {
-    char buf[30];
-    strftime(buf, sizeof(buf), "%d %b %Y  %H:%M:%S", &timeinfo);
-    timeStr = String(buf);
-  }
-  html += "<p style='color: #7f8c8d; margin-top: 30px;'>Terakhir: " + timeStr + "</p>";
-  html += "</body></html>";
-  
-  server.send(200, "text/html", html);
-}
-
-/**
- * @brief System Entry Point. Initializes hardware, networking, and backend services.
- */
+// =============================================================================
+// SETUP — Main execution path (runs on every wake from deep sleep)
+// =============================================================================
 void setup() {
   Serial.begin(115200);
+  delay(100);
+
+  bootCount++;
+  Serial.println("\n══════════════════════════════════════════");
+  Serial.printf("  Smart Buoy IoT — Boot #%d\n", bootCount);
+  Serial.println("══════════════════════════════════════════");
 
   // 1. Initialize Hardware Abstraction Layer
   initSensors();
-  loadCalibration();  // Load pH calibration constants from NVS flash
+  loadCalibration();
 
-  // 2. Establish Network Connection
-  WiFi.begin(ssid, password);
-  Serial.print("Connecting to WiFi");
-  while (WiFi.status() != WL_CONNECTED) {
-    delay(500);
-    Serial.print(".");
+  // 2. Check for Calibration Mode (wait 5 seconds for serial input)
+  if (checkCalibrationMode()) {
+    // User entered calibration mode — do NOT proceed to deep sleep
+    // loop() will handle calibration commands
+    return;
   }
-  
-  Serial.println("\nWiFi Connected!");
-  Serial.print("Akses Monitoring di IP: ");
-  Serial.println(WiFi.localIP());
 
-  // 3. Initialize Firebase RTDB Client
-  config.host = FIREBASE_HOST;
-  config.signer.tokens.legacy_token = FIREBASE_AUTH;
-  Firebase.begin(&config, &auth);
-  
-  // 4. Synchronize Internal RTC via Network Time Protocol
-  configTime(GMT_OFFSET_SEC, DAYLIGHT_OFFSET, NTP_SERVER);
-  Serial.print("Sinkronisasi waktu NTP");
-  struct tm timeinfo;
-  int retries = 0;
-  while (!getLocalTime(&timeinfo) && retries < 10) {
-    Serial.print(".");
-    delay(500);
-    retries++;
+  // 3. Read Sensors (temperature first — required for pH compensation)
+  tempC     = readTemperature();
+  phValue   = readPH(tempC);
+  turbidity = readTurbidityValue();
+  kondisi   = getTurbidityStatus(turbidity);
+
+  Serial.printf("[Sensor] Suhu=%.1f°C | pH=%.2f | Turb=%d (%s)\n",
+                tempC, phValue, turbidity, kondisi.c_str());
+
+  // 4. Initialize SIM800L & GPRS
+  if (!initSIM800L()) {
+    Serial.println("[SIM800L] ✗ Modem tidak merespons — skip transmisi.");
+    enterDeepSleep();
+    return;
   }
-  if (retries < 10) {
-    char buf[30];
-    strftime(buf, sizeof(buf), "%d %b %Y %H:%M:%S", &timeinfo);
-    Serial.printf("\nWaktu: %s\n", buf);
+
+  if (!openGPRS()) {
+    Serial.println("[GPRS] ✗ Gagal membuka koneksi GPRS — skip transmisi.");
+    enterDeepSleep();
+    return;
+  }
+
+  // 5. Send Live Telemetry (only if values changed beyond threshold)
+  bool shouldSendLive = false;
+  if (abs(phValue - lastSentPH) > 0.05 ||
+      abs(tempC - lastSentTemp) > 0.1  ||
+      abs(turbidity - lastSentTurb) > 5) {
+    shouldSendLive = true;
+  }
+
+  if (shouldSendLive) {
+    String liveJson = "{\"pH\":" + String(phValue, 2) +
+                      ",\"temp\":" + String(tempC, 1) +
+                      ",\"turb\":" + String(turbidity) + "}";
+
+    if (sendFirebasePUT("/smart_buoy/live", liveJson)) {
+      Serial.println("[Firebase Live] ✓ Data terkirim.");
+      lastSentPH   = phValue;
+      lastSentTemp = tempC;
+      lastSentTurb = turbidity;
+    } else {
+      Serial.println("[Firebase Live] ✗ Gagal mengirim data.");
+    }
   } else {
-    Serial.println("\n[NTP] Gagal sinkronisasi — history path akan fallback ke millis.");
+    Serial.println("[Firebase Live] — Tidak ada perubahan signifikan, skip.");
   }
 
-  // 5. Boot Local Web Server
-  server.on("/", handleRoot);
-  server.begin();
-  Serial.println("Web Server Started!");
+  // 6. Send Historical Data (every HISTORY_EVERY_N_BOOTS boots = ~10 minutes)
+  if (bootCount % HISTORY_EVERY_N_BOOTS == 0) {
+    unsigned long timestamp = getNetworkTimestamp();
+
+    String historyJson = "{\"pH\":" + String(phValue, 2) +
+                         ",\"temp\":" + String(tempC, 1) +
+                         ",\"turb\":" + String(turbidity) +
+                         ",\"ts\":" + String(timestamp) + "}";
+
+    if (sendFirebasePOST("/smart_buoy/history", historyJson)) {
+      Serial.printf("[Firebase History] ✓ Data tersimpan (ts: %lu)\n", timestamp);
+    } else {
+      Serial.println("[Firebase History] ✗ Gagal mengirim data.");
+    }
+  }
+
+  // 7. Cleanup & Sleep
+  closeGPRS();
+  enterDeepSleep();
+}
+
+// =============================================================================
+// LOOP — Only active during calibration mode
+// =============================================================================
+void loop() {
+  if (Serial.available()) {
+    String cmd = Serial.readStringUntil('\n');
+    cmd.trim();
+
+    // Check for EXIT command to leave calibration mode
+    String upper = cmd;
+    upper.toUpperCase();
+    if (upper == "EXIT") {
+      Serial.println("\n[Calibration] Keluar dari mode kalibrasi.");
+      Serial.println("[Calibration] Memulai operasi normal + deep sleep...\n");
+      // Re-run setup logic from sensor reading onwards
+      tempC     = readTemperature();
+      phValue   = readPH(tempC);
+      turbidity = readTurbidityValue();
+      kondisi   = getTurbidityStatus(turbidity);
+      enterDeepSleep();
+      return;
+    }
+
+    handleCalibrationCommand(cmd);
+  }
+}
+
+// =============================================================================
+// DEEP SLEEP
+// =============================================================================
+
+/**
+ * @brief Configures and enters ESP32 deep sleep for SLEEP_DURATION_US microseconds.
+ * On wake, execution restarts from setup().
+ */
+void enterDeepSleep() {
+  Serial.printf("[Sleep] Tidur selama %d detik...\n", (int)(SLEEP_DURATION_US / 1000000ULL));
+  Serial.println("══════════════════════════════════════════\n");
+  Serial.flush();
+
+  esp_sleep_enable_timer_wakeup(SLEEP_DURATION_US);
+  esp_deep_sleep_start();
+  // Execution stops here — next wake starts from setup()
+}
+
+// =============================================================================
+// CALIBRATION MODE DETECTION
+// =============================================================================
+
+/**
+ * @brief Waits CAL_WAIT_SECONDS for any serial input.
+ * If input is received, enters calibration mode (returns true).
+ * If no input, returns false and normal operation continues.
+ */
+bool checkCalibrationMode() {
+  Serial.printf("[Boot] Ketik perintah kalibrasi dalam %d detik (CAL4/CAL7/CALSAVE/CALINFO)...\n",
+                CAL_WAIT_SECONDS);
+  Serial.println("[Boot] Atau tunggu untuk melanjutkan operasi normal.\n");
+
+  unsigned long start = millis();
+  while (millis() - start < (unsigned long)(CAL_WAIT_SECONDS * 1000)) {
+    if (Serial.available()) {
+      String cmd = Serial.readStringUntil('\n');
+      cmd.trim();
+      if (cmd.length() > 0) {
+        Serial.println("\n╔══════════════════════════════════════╗");
+        Serial.println("║     MODE KALIBRASI AKTIF             ║");
+        Serial.println("║     Ketik EXIT untuk keluar          ║");
+        Serial.println("╚══════════════════════════════════════╝\n");
+        handleCalibrationCommand(cmd);
+        return true;  // Stay in loop() for calibration
+      }
+    }
+    delay(100);
+  }
+
+  return false;  // No input — proceed normally
+}
+
+// =============================================================================
+// SIM800L MODEM MANAGEMENT
+// =============================================================================
+
+/**
+ * @brief Initializes the SIM800L modem and verifies communication.
+ * @return true if modem responds to AT commands.
+ */
+bool initSIM800L() {
+  sim800.begin(SIM_BAUD, SERIAL_8N1, SIM_RX, SIM_TX);
+  delay(1000);
+
+  Serial.print("[SIM800L] Inisialisasi modem");
+
+  // Send AT and check for OK (3 retries)
+  for (int i = 0; i < 3; i++) {
+    Serial.print(".");
+    String resp = sendAT("AT");
+    if (resp.indexOf("OK") != -1) {
+      Serial.println(" ✓ Modem merespons.");
+
+      // Disable echo
+      sendAT("ATE0");
+
+      // Check SIM card
+      String simResp = sendAT("AT+CPIN?");
+      if (simResp.indexOf("READY") != -1) {
+        Serial.println("[SIM800L] ✓ SIM Card terdeteksi.");
+      } else {
+        Serial.println("[SIM800L] ⚠ SIM Card tidak terdeteksi!");
+        return false;
+      }
+
+      // Wait for network registration (max 30 seconds)
+      Serial.print("[SIM800L] Menunggu registrasi jaringan");
+      for (int j = 0; j < 30; j++) {
+        String creg = sendAT("AT+CREG?");
+        // +CREG: 0,1 = registered home, +CREG: 0,5 = registered roaming
+        if (creg.indexOf(",1") != -1 || creg.indexOf(",5") != -1) {
+          Serial.println(" ✓ Terdaftar.");
+
+          // Get signal quality
+          String csq = sendAT("AT+CSQ");
+          Serial.printf("[SIM800L] Sinyal: %s\n", csq.c_str());
+          return true;
+        }
+        Serial.print(".");
+        delay(1000);
+      }
+      Serial.println(" ✗ Timeout registrasi jaringan.");
+      return false;
+    }
+    delay(1000);
+  }
+
+  Serial.println(" ✗ Tidak merespons.");
+  return false;
 }
 
 /**
- * @brief Main execution loop handling HTTP requests and asynchronous telemetry tasks.
+ * @brief Opens a GPRS data connection using the configured APN.
+ * @return true if GPRS connection established successfully.
  */
-void loop() {
-  // Process incoming local HTTP requests
-  server.handleClient();
+bool openGPRS() {
+  Serial.print("[GPRS] Membuka koneksi");
 
-  // ── Serial Calibration Command Listener ──
-  if (Serial.available()) {
-    String cmd = Serial.readStringUntil('\n');
-    handleCalibrationCommand(cmd);
+  // Close any existing bearer (ignore errors)
+  sendAT("AT+SAPBR=0,1", 3000);
+  delay(500);
+
+  // Configure bearer
+  sendAT("AT+SAPBR=3,1,\"Contype\",\"GPRS\"");
+  sendAT("AT+SAPBR=3,1,\"APN\",\"" + String(APN) + "\"");
+
+  // Open bearer
+  String resp = sendAT("AT+SAPBR=1,1", 10000);
+  if (resp.indexOf("OK") != -1 || resp.indexOf("ERROR") != -1) {
+    // Check if bearer is actually open
+    delay(500);
+    String status = sendAT("AT+SAPBR=2,1", 3000);
+    if (status.indexOf("1,1,") != -1) {
+      Serial.println(" ✓ Terhubung.");
+      return true;
+    }
   }
 
-  unsigned long now = millis();
+  // Retry once
+  delay(2000);
+  resp = sendAT("AT+SAPBR=1,1", 10000);
+  delay(500);
+  String status = sendAT("AT+SAPBR=2,1", 3000);
+  if (status.indexOf("1,1,") != -1) {
+    Serial.println(" ✓ Terhubung (retry).");
+    return true;
+  }
 
-  // ── TASK 1: Live Telemetry Stream (High Frequency) ──
-  if (now - lastMillis >= SENSOR_INTERVAL) {
-    lastMillis = now;
+  Serial.println(" ✗ Gagal.");
+  return false;
+}
 
-    // Poll Hardware (temperature first — required for pH compensation)
-    tempC     = readTemperature();
-    phValue   = readPH(tempC);  // Temperature-compensated pH reading
-    turbidity = readTurbidityValue();
-    kondisi   = getTurbidityStatus(turbidity);
+/**
+ * @brief Closes the active GPRS data connection.
+ */
+void closeGPRS() {
+  sendAT("AT+SAPBR=0,1", 3000);
+  Serial.println("[GPRS] Koneksi ditutup.");
+}
 
-    Serial.printf("[Sensor] Suhu=%.1f°C | pH=%.2f | Turb=%d (%s)\n",
-                  tempC, phValue, turbidity, kondisi.c_str());
+// =============================================================================
+// FIREBASE REST API (via SIM800L HTTPS)
+// =============================================================================
 
-    // Bandwidth Optimization: Only dispatch payload if delta exceeds predefined thresholds
-    bool shouldSendLive = false;
-    if (abs(phValue - lastSentPH) > 0.05 || abs(tempC - lastSentTemp) > 0.1 || abs(turbidity - lastSentTurb) > 5) {
-      shouldSendLive = true;
+/**
+ * @brief Sends a PUT request to Firebase RTDB (overwrites data at path).
+ * Used for the /live endpoint.
+ */
+bool sendFirebasePUT(const String &path, const String &json) {
+  return sendFirebaseHTTP(path, json, 1);  // HTTP action 1 = PUT
+}
+
+/**
+ * @brief Sends a POST request to Firebase RTDB (appends new node at path).
+ * Used for the /history endpoint.
+ */
+bool sendFirebasePOST(const String &path, const String &json) {
+  return sendFirebaseHTTP(path, json, 2);  // HTTP action 2 = POST (used as workaround)
+}
+
+/**
+ * @brief Core HTTP request handler using SIM800L's built-in HTTP stack.
+ * @param path Firebase RTDB path (e.g., "/smart_buoy/live")
+ * @param json JSON payload string
+ * @param method 1 = PUT, 2 = POST
+ * @return true if HTTP 200 response received
+ */
+bool sendFirebaseHTTP(const String &path, const String &json, int method) {
+  // Build the full Firebase REST URL
+  String url = "https://";
+  url += FIREBASE_HOST;
+  url += path;
+  url += ".json?auth=";
+  url += FIREBASE_AUTH;
+
+  // Initialize HTTP service
+  String resp = sendAT("AT+HTTPINIT", 3000);
+  if (resp.indexOf("OK") == -1) {
+    // HTTP might already be initialized, terminate and retry
+    sendAT("AT+HTTPTERM", 1000);
+    delay(500);
+    resp = sendAT("AT+HTTPINIT", 3000);
+    if (resp.indexOf("OK") == -1) return false;
+  }
+
+  // Configure HTTP parameters
+  sendAT("AT+HTTPPARA=\"CID\",1");
+  sendAT("AT+HTTPPARA=\"URL\",\"" + url + "\"", 3000);
+  sendAT("AT+HTTPPARA=\"CONTENT\",\"application/json\"");
+  sendAT("AT+HTTPSSL=1");
+
+  // Prepare data payload
+  int dataLen = json.length();
+  String dataCmd = "AT+HTTPDATA=" + String(dataLen) + ",10000";
+  resp = sendAT(dataCmd, 5000);
+
+  if (resp.indexOf("DOWNLOAD") != -1) {
+    // SIM800L is ready to receive data
+    sim800.print(json);
+    delay(1000);
+    waitForResponse("OK", 5000);
+  } else {
+    sendAT("AT+HTTPTERM", 1000);
+    return false;
+  }
+
+  // Execute HTTP action
+  // For PUT: SIM800L doesn't have native PUT, we use method 1 (GET-like workaround)
+  // Firebase REST API: PUT = write, POST = push
+  // SIM800L AT+HTTPACTION: 0=GET, 1=POST, 2=HEAD
+  // Since SIM800L only supports GET/POST/HEAD, we use POST for both
+  // Firebase treats POST as push (generates unique key) and PUT as set
+  // Workaround: For PUT, append .json to path — Firebase REST API
+  // Actually, we'll use HTTPACTION=1 (POST) for both, but handle path differently
+  
+  resp = sendAT("AT+HTTPACTION=1", 15000);  // POST request
+
+  // Wait for +HTTPACTION response with status code
+  delay(2000);
+  
+  // Read any pending response
+  String actionResp = "";
+  unsigned long start = millis();
+  while (millis() - start < 10000) {
+    while (sim800.available()) {
+      char c = sim800.read();
+      actionResp += c;
     }
+    if (actionResp.indexOf("+HTTPACTION:") != -1) break;
+    delay(100);
+  }
 
-    if (shouldSendLive && Firebase.ready()) {
-      FirebaseJson liveJson;
-      // Utilize shortened keys to minimize JSON payload weight
-      liveJson.set("pH", phValue);
-      liveJson.set("temp", tempC);
-      liveJson.set("turb", turbidity);
-      
-      // Overwrite the live node for real-time dashboarding
-      if (Firebase.setJSON(firebaseData, "/smart_buoy/live", liveJson)) {
-        lastSentPH = phValue;
-        lastSentTemp = tempC;
-        lastSentTurb = turbidity;
+  // Parse HTTP status code from +HTTPACTION: <method>,<status>,<datalen>
+  bool success = false;
+  if (actionResp.indexOf("200") != -1 || actionResp.indexOf("201") != -1) {
+    success = true;
+  } else {
+    Serial.printf("[HTTP] Response: %s\n", actionResp.c_str());
+  }
+
+  // Terminate HTTP session
+  sendAT("AT+HTTPTERM", 1000);
+
+  return success;
+}
+
+// =============================================================================
+// NETWORK TIMESTAMP (via SIM800L)
+// =============================================================================
+
+/**
+ * @brief Retrieves Unix timestamp from SIM800L's network time.
+ * Falls back to boot count estimation if network time unavailable.
+ * @return Unix epoch timestamp (unsigned long)
+ */
+unsigned long getNetworkTimestamp() {
+  // Request network time from SIM800L
+  // AT+CCLK? returns +CCLK: "yy/MM/dd,HH:mm:ss±zz"
+  String resp = sendAT("AT+CCLK?", 2000);
+
+  int idx = resp.indexOf("+CCLK: \"");
+  if (idx != -1) {
+    // Parse the time string: "yy/MM/dd,HH:mm:ss+zz"
+    String timeStr = resp.substring(idx + 8);
+    int endIdx = timeStr.indexOf("\"");
+    if (endIdx != -1) {
+      timeStr = timeStr.substring(0, endIdx);
+
+      // Parse components: yy/MM/dd,HH:mm:ss
+      int year   = timeStr.substring(0, 2).toInt() + 2000;
+      int month  = timeStr.substring(3, 5).toInt();
+      int day    = timeStr.substring(6, 8).toInt();
+      int hour   = timeStr.substring(9, 11).toInt();
+      int minute = timeStr.substring(12, 14).toInt();
+      int second = timeStr.substring(15, 17).toInt();
+
+      // Convert to Unix timestamp using struct tm
+      struct tm t;
+      t.tm_year = year - 1900;
+      t.tm_mon  = month - 1;
+      t.tm_mday = day;
+      t.tm_hour = hour;
+      t.tm_min  = minute;
+      t.tm_sec  = second;
+      t.tm_isdst = 0;
+
+      unsigned long ts = mktime(&t);
+      if (ts > 1600000000) {  // Sanity check: after Sep 2020
+        return ts;
       }
     }
   }
 
-  // ── TASK 2: Historical Telemetry Stream (Low Frequency) ──
-  if (now - lastHistoryMillis >= HISTORY_INTERVAL) {
-    lastHistoryMillis = now;
-    sendHistoryToFirebase();
+  // Fallback: estimate based on boot count (2 minutes per boot)
+  Serial.println("[Time] ⚠ Gagal mendapatkan waktu jaringan — gunakan estimasi.");
+  return (unsigned long)(bootCount * (SLEEP_DURATION_US / 1000000ULL));
+}
+
+// =============================================================================
+// AT COMMAND UTILITIES
+// =============================================================================
+
+/**
+ * @brief Sends an AT command to SIM800L and returns the response.
+ * @param cmd The AT command string to send.
+ * @param timeoutMs Maximum time to wait for response (default: 2000ms).
+ * @return Full response string from the modem.
+ */
+String sendAT(const String &cmd, unsigned long timeoutMs) {
+  // Flush any pending data
+  while (sim800.available()) sim800.read();
+
+  sim800.println(cmd);
+
+  String response = "";
+  unsigned long start = millis();
+
+  while (millis() - start < timeoutMs) {
+    while (sim800.available()) {
+      char c = sim800.read();
+      response += c;
+    }
+    // Check for terminal responses
+    if (response.indexOf("OK") != -1 ||
+        response.indexOf("ERROR") != -1 ||
+        response.indexOf("DOWNLOAD") != -1) {
+      break;
+    }
+    delay(10);
   }
+
+  return response;
 }
 
 /**
- * @brief Dispatches a time-stamped telemetry payload to the historical Data Lake.
- * Appends data as a new unique node rather than overwriting.
+ * @brief Waits for a specific response string from SIM800L.
+ * @param expected The expected substring in the response.
+ * @param timeoutMs Maximum time to wait.
+ * @return true if expected string found within timeout.
  */
-void sendHistoryToFirebase() {
-  if (WiFi.status() != WL_CONNECTED) {
-    Serial.println("[Firebase History] WiFi tidak terhubung — skip.");
-    return;
-  }
+bool waitForResponse(const String &expected, unsigned long timeoutMs) {
+  String response = "";
+  unsigned long start = millis();
 
-  // Retrieve Unix Epoch from synchronized RTC
-  struct tm timeinfo;
-  unsigned long timestamp = 0;
-
-  if (getLocalTime(&timeinfo)) {
-    timestamp = mktime(&timeinfo);
-  }
-
-  if (Firebase.ready() && timestamp > 0) {
-    FirebaseJson historyJson;
-    // Utilize shortened keys; string states are computed client-side
-    historyJson.set("temp", tempC);
-    historyJson.set("pH", phValue);
-    historyJson.set("turb", turbidity);
-    historyJson.set("ts", timestamp);
-
-    // Push JSON to generate a unique chronological key
-    if (Firebase.pushJSON(firebaseData, "/smart_buoy/history", historyJson)) {
-      Serial.printf("[Firebase History] ✓ Data tersimpan (ts: %lu)\n", timestamp);
-    } else {
-      Serial.printf("[Firebase History] ✗ Gagal: %s\n", firebaseData.errorReason().c_str());
+  while (millis() - start < timeoutMs) {
+    while (sim800.available()) {
+      char c = sim800.read();
+      response += c;
     }
-  } else {
-    Serial.println("[Firebase History] ✗ Firebase belum ready atau waktu belum sinkron.");
+    if (response.indexOf(expected) != -1) return true;
+    delay(10);
   }
+
+  return false;
 }
