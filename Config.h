@@ -51,7 +51,6 @@ static const char *APN = "internet";
  */
 #define SLEEP_DURATION_US      120000000ULL  ///< 2 minutes in microseconds (120s × 1,000,000)
 #define HISTORY_EVERY_N_BOOTS  5             ///< Push history every 5 boots (5 × 2 min = 10 min)
-#define CAL_WAIT_SECONDS       5             ///< Seconds to wait for calibration input at boot
 
 /* ==========================================
  * FIREBASE CONFIGURATION

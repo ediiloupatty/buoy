@@ -19,10 +19,8 @@
  *   - Every 5th boot (~10 minutes), also pushes historical data via HTTPS POST
  *   - Returns to deep sleep
  * 
- * Calibration Mode:
- *   - At boot, firmware waits 5 seconds for serial input
- *   - If CAL4/CAL7/CALSAVE/CALINFO is received, enters calibration mode
- *   - Type EXIT to leave calibration mode and resume normal operation
+ * Note: pH sensor calibration is handled by a separate dedicated sketch
+ *       located in the kalibrasi/ directory.
  */
 
 #include <time.h>
@@ -56,7 +54,6 @@ bool   sendFirebasePOST(const String &path, const String &json);
 String sendAT(const String &cmd, unsigned long timeoutMs = 2000);
 bool   waitForResponse(const String &expected, unsigned long timeoutMs = 2000);
 void   enterDeepSleep();
-bool   checkCalibrationMode();
 unsigned long getNetworkTimestamp();
 
 // =============================================================================
@@ -75,14 +72,7 @@ void setup() {
   initSensors();
   loadCalibration();
 
-  // 2. Check for Calibration Mode (wait 5 seconds for serial input)
-  if (checkCalibrationMode()) {
-    // User entered calibration mode — do NOT proceed to deep sleep
-    // loop() will handle calibration commands
-    return;
-  }
-
-  // 3. Read Sensors (temperature first — required for pH compensation)
+  // 2. Read Sensors (temperature first — required for pH compensation)
   tempC     = readTemperature();
   phValue   = readPH(tempC);
   turbidity = readTurbidityValue();
@@ -151,30 +141,10 @@ void setup() {
 }
 
 // =============================================================================
-// LOOP — Only active during calibration mode
+// LOOP — Not used in deep sleep model (setup handles everything)
 // =============================================================================
 void loop() {
-  if (Serial.available()) {
-    String cmd = Serial.readStringUntil('\n');
-    cmd.trim();
-
-    // Check for EXIT command to leave calibration mode
-    String upper = cmd;
-    upper.toUpperCase();
-    if (upper == "EXIT") {
-      Serial.println("\n[Calibration] Keluar dari mode kalibrasi.");
-      Serial.println("[Calibration] Memulai operasi normal + deep sleep...\n");
-      // Re-run setup logic from sensor reading onwards
-      tempC     = readTemperature();
-      phValue   = readPH(tempC);
-      turbidity = readTurbidityValue();
-      kondisi   = getTurbidityStatus(turbidity);
-      enterDeepSleep();
-      return;
-    }
-
-    handleCalibrationCommand(cmd);
-  }
+  // Execution never reaches here — ESP32 enters deep sleep at end of setup()
 }
 
 // =============================================================================
@@ -193,40 +163,6 @@ void enterDeepSleep() {
   esp_sleep_enable_timer_wakeup(SLEEP_DURATION_US);
   esp_deep_sleep_start();
   // Execution stops here — next wake starts from setup()
-}
-
-// =============================================================================
-// CALIBRATION MODE DETECTION
-// =============================================================================
-
-/**
- * @brief Waits CAL_WAIT_SECONDS for any serial input.
- * If input is received, enters calibration mode (returns true).
- * If no input, returns false and normal operation continues.
- */
-bool checkCalibrationMode() {
-  Serial.printf("[Boot] Ketik perintah kalibrasi dalam %d detik (CAL4/CAL7/CALSAVE/CALINFO)...\n",
-                CAL_WAIT_SECONDS);
-  Serial.println("[Boot] Atau tunggu untuk melanjutkan operasi normal.\n");
-
-  unsigned long start = millis();
-  while (millis() - start < (unsigned long)(CAL_WAIT_SECONDS * 1000)) {
-    if (Serial.available()) {
-      String cmd = Serial.readStringUntil('\n');
-      cmd.trim();
-      if (cmd.length() > 0) {
-        Serial.println("\n╔══════════════════════════════════════╗");
-        Serial.println("║     MODE KALIBRASI AKTIF             ║");
-        Serial.println("║     Ketik EXIT untuk keluar          ║");
-        Serial.println("╚══════════════════════════════════════╝\n");
-        handleCalibrationCommand(cmd);
-        return true;  // Stay in loop() for calibration
-      }
-    }
-    delay(100);
-  }
-
-  return false;  // No input — proceed normally
 }
 
 // =============================================================================
