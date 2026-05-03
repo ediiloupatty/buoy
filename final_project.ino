@@ -9,14 +9,18 @@
  * @file final_project.ino
  * @brief Core application logic for the Smart Buoy IoT System.
  * 
- * Handles SIM800L GPRS connectivity, NTP-less timestamping via network time,
+ * Handles connectivity (WiFi or SIM800L GPRS), timestamping,
  * deep sleep power management, and dual-pipeline Firebase REST API telemetry.
+ * 
+ * Build Modes (controlled by USE_WIFI in Config.h):
+ *   - USE_WIFI defined:   WiFi + HTTPClient + NTP (testing/development)
+ *   - USE_WIFI undefined:  SIM800L GPRS + AT Commands (production/field)
  * 
  * Execution Model:
  *   - ESP32 wakes from deep sleep every 2 minutes
  *   - Reads all sensors
- *   - Sends live data to Firebase via SIM800L HTTPS PUT
- *   - Every 5th boot (~10 minutes), also pushes historical data via HTTPS POST
+ *   - Sends live data to Firebase via HTTPS
+ *   - Every 5th boot (~10 minutes), also pushes historical data
  *   - Returns to deep sleep
  * 
  * Note: pH sensor calibration is handled by a separate dedicated sketch
@@ -24,14 +28,21 @@
  */
 
 #include <time.h>
-#include <HardwareSerial.h>
 
 // Custom Hardware Modules
 #include "Config.h"
 #include "Sensors.h"
 
-// SIM800L Serial (UART2)
-HardwareSerial sim800(2);
+// ── Platform-specific includes ───────────────────────────────────────────────
+#ifdef USE_WIFI
+  #include <WiFi.h>
+  #include <HTTPClient.h>
+  #include <WiFiClientSecure.h>
+#else
+  #include <HardwareSerial.h>
+  // SIM800L Serial (UART2)
+  HardwareSerial sim800(2);
+#endif
 
 // ── RTC Memory: Survives deep sleep ──────────────────────────────────────────
 RTC_DATA_ATTR int   bootCount = 0;          ///< Tracks number of wake cycles
@@ -46,15 +57,24 @@ int    turbidity = 0;
 String kondisi   = "";
 
 // ── Forward Declarations ─────────────────────────────────────────────────────
+void enterDeepSleep();
+
+#ifdef USE_WIFI
+bool   connectWiFi();
+void   disconnectWiFi();
+bool   sendFirebaseHTTPWiFi(const String &path, const String &json, const String &method);
+unsigned long getTimestampNTP();
+#else
 bool   initSIM800L();
 bool   openGPRS();
 void   closeGPRS();
 bool   sendFirebasePUT(const String &path, const String &json);
 bool   sendFirebasePOST(const String &path, const String &json);
+bool   sendFirebaseHTTP(const String &path, const String &json, int method);
 String sendAT(const String &cmd, unsigned long timeoutMs = 2000);
 bool   waitForResponse(const String &expected, unsigned long timeoutMs = 2000);
-void   enterDeepSleep();
 unsigned long getNetworkTimestamp();
+#endif
 
 // =============================================================================
 // SETUP — Main execution path (runs on every wake from deep sleep)
@@ -66,6 +86,11 @@ void setup() {
   bootCount++;
   Serial.println("\n══════════════════════════════════════════");
   Serial.printf("  Smart Buoy IoT — Boot #%d\n", bootCount);
+#ifdef USE_WIFI
+  Serial.println("  [MODE: WiFi Test]");
+#else
+  Serial.println("  [MODE: SIM800L Production]");
+#endif
   Serial.println("══════════════════════════════════════════");
 
   // 1. Initialize Hardware Abstraction Layer
@@ -81,20 +106,27 @@ void setup() {
   Serial.printf("[Sensor] Suhu=%.1f°C | pH=%.2f | Turb=%d (%s)\n",
                 tempC, phValue, turbidity, kondisi.c_str());
 
-  // 4. Initialize SIM800L & GPRS
+  // 3. Initialize Network Connection
+#ifdef USE_WIFI
+  if (!connectWiFi()) {
+    Serial.println("[WiFi] ✗ Gagal terhubung — skip transmisi.");
+    enterDeepSleep();
+    return;
+  }
+#else
   if (!initSIM800L()) {
     Serial.println("[SIM800L] ✗ Modem tidak merespons — skip transmisi.");
     enterDeepSleep();
     return;
   }
-
   if (!openGPRS()) {
     Serial.println("[GPRS] ✗ Gagal membuka koneksi GPRS — skip transmisi.");
     enterDeepSleep();
     return;
   }
+#endif
 
-  // 5. Send Live Telemetry (only if values changed beyond threshold)
+  // 4. Send Live Telemetry (only if values changed beyond threshold)
   bool shouldSendLive = false;
   if (abs(phValue - lastSentPH) > 0.05 ||
       abs(tempC - lastSentTemp) > 0.1  ||
@@ -107,7 +139,11 @@ void setup() {
                       ",\"temp\":" + String(tempC, 1) +
                       ",\"turb\":" + String(turbidity) + "}";
 
+#ifdef USE_WIFI
+    if (sendFirebaseHTTPWiFi("/smart_buoy/live", liveJson, "PUT")) {
+#else
     if (sendFirebasePUT("/smart_buoy/live", liveJson)) {
+#endif
       Serial.println("[Firebase Live] ✓ Data terkirim.");
       lastSentPH   = phValue;
       lastSentTemp = tempC;
@@ -119,24 +155,37 @@ void setup() {
     Serial.println("[Firebase Live] — Tidak ada perubahan signifikan, skip.");
   }
 
-  // 6. Send Historical Data (every HISTORY_EVERY_N_BOOTS boots = ~10 minutes)
+  // 5. Send Historical Data (every HISTORY_EVERY_N_BOOTS boots = ~10 minutes)
   if (bootCount % HISTORY_EVERY_N_BOOTS == 0) {
+#ifdef USE_WIFI
+    unsigned long timestamp = getTimestampNTP();
+#else
     unsigned long timestamp = getNetworkTimestamp();
+#endif
 
     String historyJson = "{\"pH\":" + String(phValue, 2) +
                          ",\"temp\":" + String(tempC, 1) +
                          ",\"turb\":" + String(turbidity) +
                          ",\"ts\":" + String(timestamp) + "}";
 
+#ifdef USE_WIFI
+    if (sendFirebaseHTTPWiFi("/smart_buoy/history", historyJson, "POST")) {
+#else
     if (sendFirebasePOST("/smart_buoy/history", historyJson)) {
+#endif
       Serial.printf("[Firebase History] ✓ Data tersimpan (ts: %lu)\n", timestamp);
     } else {
       Serial.println("[Firebase History] ✗ Gagal mengirim data.");
     }
   }
 
-  // 7. Cleanup & Sleep
+  // 6. Cleanup & Sleep
+#ifdef USE_WIFI
+  disconnectWiFi();
+#else
   closeGPRS();
+#endif
+
   enterDeepSleep();
 }
 
@@ -166,7 +215,131 @@ void enterDeepSleep() {
 }
 
 // =============================================================================
-// SIM800L MODEM MANAGEMENT
+// ██╗    ██╗██╗███████╗██╗    ███╗   ███╗ ██████╗ ██████╗ ███████╗
+// ██║    ██║██║██╔════╝██║    ████╗ ████║██╔═══██╗██╔══██╗██╔════╝
+// ██║ █╗ ██║██║█████╗  ██║    ██╔████╔██║██║   ██║██║  ██║█████╗
+// ██║███╗██║██║██╔══╝  ██║    ██║╚██╔╝██║██║   ██║██║  ██║██╔══╝
+// ╚███╔███╔╝██║██║     ██║    ██║ ╚═╝ ██║╚██████╔╝██████╔╝███████╗
+//  ╚══╝╚══╝ ╚═╝╚═╝     ╚═╝    ╚═╝     ╚═╝ ╚═════╝ ╚═════╝ ╚══════╝
+// =============================================================================
+#ifdef USE_WIFI
+
+/**
+ * @brief Connects to the configured WiFi network.
+ * @return true if connected within 10 seconds (20 × 500ms).
+ */
+bool connectWiFi() {
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(WIFI_SSID, WIFI_PASS);
+
+  Serial.printf("[WiFi] Menghubungkan ke \"%s\"", WIFI_SSID);
+
+  int attempts = 0;
+  while (WiFi.status() != WL_CONNECTED && attempts < 20) {
+    delay(500);
+    Serial.print(".");
+    attempts++;
+  }
+
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.println(" ✓ Terhubung.");
+    Serial.printf("[WiFi] IP: %s | RSSI: %d dBm\n",
+                  WiFi.localIP().toString().c_str(), WiFi.RSSI());
+    return true;
+  }
+
+  Serial.println(" ✗ Gagal.");
+  WiFi.disconnect(true);
+  WiFi.mode(WIFI_OFF);
+  return false;
+}
+
+/**
+ * @brief Disconnects WiFi and powers off the radio to minimize sleep current.
+ */
+void disconnectWiFi() {
+  WiFi.disconnect(true);
+  WiFi.mode(WIFI_OFF);
+  Serial.println("[WiFi] Koneksi ditutup.");
+}
+
+/**
+ * @brief Sends an HTTP PUT or POST request to Firebase RTDB via WiFi.
+ * @param path Firebase RTDB path (e.g., "/smart_buoy/live")
+ * @param json JSON payload string
+ * @param method "PUT" or "POST"
+ * @return true if HTTP 200/201 response received
+ */
+bool sendFirebaseHTTPWiFi(const String &path, const String &json, const String &method) {
+  WiFiClientSecure client;
+  client.setInsecure();  // Skip certificate verification for testing
+
+  HTTPClient http;
+  String url = "https://";
+  url += FIREBASE_HOST;
+  url += path;
+  url += ".json?auth=";
+  url += FIREBASE_AUTH;
+
+  if (!http.begin(client, url)) {
+    Serial.println("[HTTP] ✗ Gagal memulai koneksi.");
+    return false;
+  }
+
+  http.addHeader("Content-Type", "application/json");
+  http.setTimeout(15000);
+
+  int httpCode;
+  if (method == "PUT") {
+    httpCode = http.PUT(json);
+  } else {
+    httpCode = http.POST(json);
+  }
+
+  bool success = (httpCode == 200 || httpCode == 201);
+  if (!success) {
+    Serial.printf("[HTTP] Response code: %d\n", httpCode);
+    if (httpCode > 0) {
+      String resp = http.getString();
+      Serial.printf("[HTTP] Response: %s\n", resp.c_str());
+    }
+  }
+
+  http.end();
+  return success;
+}
+
+/**
+ * @brief Retrieves Unix timestamp via NTP over WiFi.
+ * Falls back to boot count estimation if NTP sync fails.
+ * @return Unix epoch timestamp (unsigned long)
+ */
+unsigned long getTimestampNTP() {
+  // Configure NTP — GMT+8 for WITA/Ambon timezone, no DST
+  configTime(8 * 3600, 0, "pool.ntp.org", "time.google.com");
+
+  struct tm timeinfo;
+  if (getLocalTime(&timeinfo, 5000)) {
+    unsigned long ts = mktime(&timeinfo);
+    Serial.printf("[NTP] Waktu: %04d-%02d-%02d %02d:%02d:%02d\n",
+                  timeinfo.tm_year + 1900, timeinfo.tm_mon + 1, timeinfo.tm_mday,
+                  timeinfo.tm_hour, timeinfo.tm_min, timeinfo.tm_sec);
+    return ts;
+  }
+
+  // Fallback: estimate based on boot count
+  Serial.println("[NTP] ⚠ Gagal sinkronisasi waktu — gunakan estimasi.");
+  return (unsigned long)(bootCount * (SLEEP_DURATION_US / 1000000ULL));
+}
+
+#else
+// =============================================================================
+// ███████╗██╗███╗   ███╗ █████╗  ██████╗  ██████╗ ██╗
+// ██╔════╝██║████╗ ████║██╔══██╗██╔═████╗██╔═████╗██║
+// ███████╗██║██╔████╔██║╚█████╔╝██║██╔██║██║██╔██║██║
+// ╚════██║██║██║╚██╔╝██║██╔══██╗████╔╝██║████╔╝██║██║
+// ███████║██║██║ ╚═╝ ██║╚█████╔╝╚██████╔╝╚██████╔╝███████╗
+// ╚══════╝╚═╝╚═╝     ╚═╝ ╚════╝  ╚═════╝  ╚═════╝ ╚══════╝
 // =============================================================================
 
 /**
@@ -488,3 +661,5 @@ bool waitForResponse(const String &expected, unsigned long timeoutMs) {
 
   return false;
 }
+
+#endif // USE_WIFI

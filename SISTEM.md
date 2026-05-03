@@ -225,7 +225,7 @@ Sistem menggunakan **deep sleep mode** dengan interval 2 menit. ESP32 hanya akti
 
   Kapasitas baterai        : 24.79 Wh
   Runtime tanpa solar      : 24.79 / 0.135 ≈ 183.6 jam ≈ 7.7 hari
-  Dengan solar             : INDEFINITE (surplus harian) ♾️
+  Dengan solar             : INDEFINITE (surplus harian)
 ```
 
 > **Kesimpulan:** Dengan implementasi deep sleep, sistem mencapai **surplus energi harian +2.36 Wh**, memungkinkan operasi **tanpa batas waktu** selama panel surya menerima cahaya minimal ~4 jam per hari. Bahkan dalam kondisi mendung berturut-turut, baterai 6700mAh mampu menopang operasi selama ~7.7 hari tanpa pengisian.
