@@ -66,7 +66,7 @@ bool   sendFirebaseHTTPWiFi(const String &path, const String &json, const String
 unsigned long getTimestampNTP();
 #else
 bool   initSIM800L();
-void   powerCycleSIM800L();
+void   resetSIM800L();
 bool   openGPRS();
 void   closeGPRS();
 bool   sendFirebasePUT(const String &path, const String &json);
@@ -344,16 +344,19 @@ unsigned long getTimestampNTP() {
 // =============================================================================
 
 /**
- * @brief Toggles SIM800L PWRKEY to power on/reset the modem.
- * PWRKEY must be pulled LOW for ~1 second to toggle power state.
+ * @brief Mereset SIM800L melalui pin RST (active LOW).
+ * Pull RST ke LOW selama 200ms, lalu release HIGH.
+ * Tunggu 3 detik agar modem selesai boot ulang.
  */
-void powerCycleSIM800L() {
-  pinMode(SIM_PWRKEY, OUTPUT);
-  digitalWrite(SIM_PWRKEY, LOW);
-  delay(1200);  // SIM800L PWRKEY minimum pulse: 1 second
-  digitalWrite(SIM_PWRKEY, HIGH);
-  delay(3000);  // Wait for modem to boot up
-  Serial.println("[SIM800L] PWRKEY toggled — menunggu modem boot...");
+void resetSIM800L() {
+  pinMode(SIM_RST, OUTPUT);
+  digitalWrite(SIM_RST, HIGH);  // Pastikan HIGH dulu (idle state)
+  delay(100);
+  digitalWrite(SIM_RST, LOW);   // Trigger reset (active LOW)
+  delay(200);                   // Minimum pulse 100-200ms
+  digitalWrite(SIM_RST, HIGH);  // Release
+  delay(3000);                  // Tunggu modem boot ulang
+  Serial.println("[SIM800L] RST triggered — menunggu modem boot...");
 }
 
 /**
@@ -388,8 +391,8 @@ bool initSIM800L() {
 
   // ── Step 3: Jika tidak respons, lakukan PWRKEY toggle ───────────────────────
   if (!modemReady) {
-    Serial.println("\n[SIM800L] ⚠ Tidak ada respons — mencoba PWRKEY toggle...");
-    powerCycleSIM800L();
+    Serial.println("\n[SIM800L] ⚠ Tidak ada respons — mencoba RST reset...");
+    resetSIM800L();
 
     // Coba lagi setelah power cycle (max 5 detik)
     for (int i = 0; i < 5; i++) {
@@ -404,8 +407,8 @@ bool initSIM800L() {
   }
 
   if (!modemReady) {
-    Serial.println("\n[SIM800L] ✗ Modem tidak merespons setelah PWRKEY toggle.");
-    Serial.println("[SIM800L] ✗ Periksa: kabel TX/RX, tegangan power (3.7-4.2V), dan pin PWRKEY.");
+    Serial.println("[SIM800L] ✗ Modem tidak merespons setelah RST reset.");
+    Serial.println("[SIM800L] ✗ Periksa: kabel TX/RX, tegangan power (3.7-4.2V), dan sambungan RST.");
     return false;
   }
 

@@ -43,10 +43,10 @@ static const char *WIFI_PASS = "Loupatty143";
 #define TEMP_PIN 4    ///< GPIO Pin for DS18B20 OneWire Data
 
 // SIM800L UART Pins
-#define SIM_RX      16   ///< GPIO Pin for SIM800L TX → ESP32 RX (UART2)
-#define SIM_TX      17   ///< GPIO Pin for SIM800L RX ← ESP32 TX (UART2)
-#define SIM_PWRKEY  5    ///< GPIO Pin for SIM800L PWRKEY (untuk hardware reset)
-#define SIM_BAUD    9600 ///< SIM800L default baud rate (9600 lebih stabil dari 115200)
+#define SIM_RX   16   ///< GPIO Pin for SIM800L TX → ESP32 RX (UART2)
+#define SIM_TX   17   ///< GPIO Pin for SIM800L RX ← ESP32 TX (UART2)
+#define SIM_RST  5    ///< GPIO Pin for SIM800L RST (active LOW — pull LOW 200ms untuk reset)
+#define SIM_BAUD 9600 ///< SIM800L default baud rate (9600 lebih stabil dari 115200)
 
 /* ==========================================
  * SIM800L / GPRS CONFIGURATION
