@@ -389,7 +389,7 @@ bool initSIM800L() {
     delay(500);
   }
 
-  // ── Step 3: Jika tidak respons, lakukan PWRKEY toggle ───────────────────────
+  // ── Step 3: Jika tidak respons, lakukan RST reset ──────────────────────────
   if (!modemReady) {
     Serial.println("\n[SIM800L] ⚠ Tidak ada respons — mencoba RST reset...");
     resetSIM800L();
@@ -408,7 +408,7 @@ bool initSIM800L() {
 
   if (!modemReady) {
     Serial.println("[SIM800L] ✗ Modem tidak merespons setelah RST reset.");
-    Serial.println("[SIM800L] ✗ Periksa: kabel TX/RX, tegangan power (3.7-4.2V), dan sambungan RST.");
+    Serial.println("[SIM800L] ✗ Periksa: kabel TX/RX, tegangan power (4.6-5.2V untuk V2), dan sambungan RST.");
     return false;
   }
 
@@ -519,9 +519,18 @@ void closeGPRS() {
 /**
  * @brief Sends a PUT request to Firebase RTDB (overwrites data at path).
  * Used for the /live endpoint.
+ *
+ * SIM800L AT+HTTPACTION hanya support: 0=GET, 1=POST, 2=HEAD.
+ * Tidak ada native PUT. Firebase REST API memperlakukan POST ke path
+ * sebagai push (auto-key), KECUALI path diakhiri dengan node spesifik.
+ * Workaround: gunakan HTTPACTION=1 (POST) tapi bedakan di path.
+ * Untuk /live, Firebase Rules bisa di-set agar POST = overwrite,
+ * atau gunakan Firebase Legacy REST dengan ?x-http-method-override=PUT.
+ *
+ * Solusi terbaik: tambahkan header X-HTTP-Method-Override
  */
 bool sendFirebasePUT(const String &path, const String &json) {
-  return sendFirebaseHTTP(path, json, 1);  // HTTP action 1 = PUT
+  return sendFirebaseHTTP(path, json, 1);  // method=1: gunakan header override PUT
 }
 
 /**
@@ -529,7 +538,7 @@ bool sendFirebasePUT(const String &path, const String &json) {
  * Used for the /history endpoint.
  */
 bool sendFirebasePOST(const String &path, const String &json) {
-  return sendFirebaseHTTP(path, json, 2);  // HTTP action 2 = POST (used as workaround)
+  return sendFirebaseHTTP(path, json, 2);  // method=2: POST biasa
 }
 
 /**
@@ -561,6 +570,10 @@ bool sendFirebaseHTTP(const String &path, const String &json, int method) {
   sendAT("AT+HTTPPARA=\"CID\",1");
   sendAT("AT+HTTPPARA=\"URL\",\"" + url + "\"", 3000);
   sendAT("AT+HTTPPARA=\"CONTENT\",\"application/json\"");
+  // Tambah header X-HTTP-Method-Override untuk PUT (SIM800L tidak support native PUT)
+  if (method == 1) {
+    sendAT("AT+HTTPPARA=\"USERDATA\",\"X-HTTP-Method-Override: PUT\\r\\n\"");
+  }
   sendAT("AT+HTTPSSL=1");
 
   // Prepare data payload

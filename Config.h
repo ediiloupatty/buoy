@@ -63,7 +63,7 @@ static const char *APN = "internet";
  * DEEP SLEEP CONFIGURATION
  * ==========================================
  */
-#define SLEEP_DURATION_US      60000000ULL   ///< 1 minute in microseconds (60s × 1,000,000)
+#define SLEEP_DURATION_US      30000000ULL  ///< DEBUG MODE: 30 detik. Ubah ke 60000000ULL saat produksi.
 #define HISTORY_EVERY_N_BOOTS  10            ///< Push history every 10 boots (10 × 1 min = 10 min)
 
 /* ==========================================
