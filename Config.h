@@ -22,7 +22,7 @@
  * Define USE_WIFI for testing with WiFi + HTTPClient.
  * Comment out to use SIM800L GPRS (production/field deployment).
  */
-#define USE_WIFI  // ← Comment this line to switch back to SIM800L mode
+// #define USE_WIFI  // ← Commented out: Using SIM800L only
 
 #ifdef USE_WIFI
 static const char *WIFI_SSID = "No Internet Connection";
@@ -43,9 +43,10 @@ static const char *WIFI_PASS = "Loupatty143";
 #define TEMP_PIN 4    ///< GPIO Pin for DS18B20 OneWire Data
 
 // SIM800L UART Pins
-#define SIM_RX   16   ///< GPIO Pin for SIM800L TX → ESP32 RX (UART2)
-#define SIM_TX   17   ///< GPIO Pin for SIM800L RX ← ESP32 TX (UART2)
-#define SIM_BAUD 9600 ///< SIM800L default baud rate
+#define SIM_RX      16   ///< GPIO Pin for SIM800L TX → ESP32 RX (UART2)
+#define SIM_TX      17   ///< GPIO Pin for SIM800L RX ← ESP32 TX (UART2)
+#define SIM_PWRKEY  5    ///< GPIO Pin for SIM800L PWRKEY (untuk hardware reset)
+#define SIM_BAUD    9600 ///< SIM800L default baud rate (9600 lebih stabil dari 115200)
 
 /* ==========================================
  * SIM800L / GPRS CONFIGURATION

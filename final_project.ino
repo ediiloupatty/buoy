@@ -66,6 +66,7 @@ bool   sendFirebaseHTTPWiFi(const String &path, const String &json, const String
 unsigned long getTimestampNTP();
 #else
 bool   initSIM800L();
+void   powerCycleSIM800L();
 bool   openGPRS();
 void   closeGPRS();
 bool   sendFirebasePUT(const String &path, const String &json);
@@ -343,57 +344,119 @@ unsigned long getTimestampNTP() {
 // =============================================================================
 
 /**
+ * @brief Toggles SIM800L PWRKEY to power on/reset the modem.
+ * PWRKEY must be pulled LOW for ~1 second to toggle power state.
+ */
+void powerCycleSIM800L() {
+  pinMode(SIM_PWRKEY, OUTPUT);
+  digitalWrite(SIM_PWRKEY, LOW);
+  delay(1200);  // SIM800L PWRKEY minimum pulse: 1 second
+  digitalWrite(SIM_PWRKEY, HIGH);
+  delay(3000);  // Wait for modem to boot up
+  Serial.println("[SIM800L] PWRKEY toggled — menunggu modem boot...");
+}
+
+/**
  * @brief Initializes the SIM800L modem and verifies communication.
- * @return true if modem responds to AT commands.
+ *
+ * Flow:
+ *  1. Start serial at default 9600 baud
+ *  2. Try AT command — jika tidak respons, lakukan PWRKEY toggle (power on)
+ *  3. Tunggu modem siap, nonaktifkan echo
+ *  4. Validasi SIM card dan registrasi jaringan
+ *
+ * @return true if modem responds, SIM detected, and network registered.
  */
 bool initSIM800L() {
+  // ── Step 1: Start Serial ────────────────────────────────────────────────────
   sim800.begin(SIM_BAUD, SERIAL_8N1, SIM_RX, SIM_TX);
-  delay(1000);
+  delay(500);
 
   Serial.print("[SIM800L] Inisialisasi modem");
 
-  // Send AT and check for OK (3 retries)
+  // ── Step 2: Cek apakah modem sudah aktif (setelah wake dari deep sleep) ────
+  bool modemReady = false;
   for (int i = 0; i < 3; i++) {
     Serial.print(".");
-    String resp = sendAT("AT");
+    String resp = sendAT("AT", 1500);
     if (resp.indexOf("OK") != -1) {
-      Serial.println(" ✓ Modem merespons.");
-
-      // Disable echo
-      sendAT("ATE0");
-
-      // Check SIM card
-      String simResp = sendAT("AT+CPIN?");
-      if (simResp.indexOf("READY") != -1) {
-        Serial.println("[SIM800L] ✓ SIM Card terdeteksi.");
-      } else {
-        Serial.println("[SIM800L] ⚠ SIM Card tidak terdeteksi!");
-        return false;
-      }
-
-      // Wait for network registration (max 30 seconds)
-      Serial.print("[SIM800L] Menunggu registrasi jaringan");
-      for (int j = 0; j < 30; j++) {
-        String creg = sendAT("AT+CREG?");
-        // +CREG: 0,1 = registered home, +CREG: 0,5 = registered roaming
-        if (creg.indexOf(",1") != -1 || creg.indexOf(",5") != -1) {
-          Serial.println(" ✓ Terdaftar.");
-
-          // Get signal quality
-          String csq = sendAT("AT+CSQ");
-          Serial.printf("[SIM800L] Sinyal: %s\n", csq.c_str());
-          return true;
-        }
-        Serial.print(".");
-        delay(1000);
-      }
-      Serial.println(" ✗ Timeout registrasi jaringan.");
-      return false;
+      modemReady = true;
+      break;
     }
+    delay(500);
+  }
+
+  // ── Step 3: Jika tidak respons, lakukan PWRKEY toggle ───────────────────────
+  if (!modemReady) {
+    Serial.println("\n[SIM800L] ⚠ Tidak ada respons — mencoba PWRKEY toggle...");
+    powerCycleSIM800L();
+
+    // Coba lagi setelah power cycle (max 5 detik)
+    for (int i = 0; i < 5; i++) {
+      Serial.print(".");
+      String resp = sendAT("AT", 2000);
+      if (resp.indexOf("OK") != -1) {
+        modemReady = true;
+        break;
+      }
+      delay(1000);
+    }
+  }
+
+  if (!modemReady) {
+    Serial.println("\n[SIM800L] ✗ Modem tidak merespons setelah PWRKEY toggle.");
+    Serial.println("[SIM800L] ✗ Periksa: kabel TX/RX, tegangan power (3.7-4.2V), dan pin PWRKEY.");
+    return false;
+  }
+
+  Serial.println("\n[SIM800L] ✓ Modem merespons.");
+
+  // ── Step 4: Konfigurasi dasar modem ─────────────────────────────────────────
+  sendAT("ATE0");          // Nonaktifkan echo
+  sendAT("AT+CMEE=2");     // Enable verbose error reporting (untuk debug)
+
+  // ── Step 5: Validasi SIM Card ────────────────────────────────────────────────
+  String simResp = "";
+  for (int i = 0; i < 5; i++) {
+    simResp = sendAT("AT+CPIN?", 3000);
+    if (simResp.indexOf("READY") != -1) break;
     delay(1000);
   }
 
-  Serial.println(" ✗ Tidak merespons.");
+  if (simResp.indexOf("READY") != -1) {
+    Serial.println("[SIM800L] ✓ SIM Card terdeteksi.");
+  } else if (simResp.indexOf("SIM PIN") != -1) {
+    Serial.println("[SIM800L] ✗ SIM Card terkunci PIN — masukkan PIN dulu.");
+    return false;
+  } else if (simResp.indexOf("NO SIM") != -1 || simResp.indexOf("SIM not") != -1) {
+    Serial.println("[SIM800L] ✗ SIM Card tidak terpasang.");
+    return false;
+  } else {
+    Serial.printf("[SIM800L] ✗ Status SIM tidak dikenal: %s\n", simResp.c_str());
+    return false;
+  }
+
+  // ── Step 6: Tunggu Registrasi Jaringan (max 45 detik) ───────────────────────
+  Serial.print("[SIM800L] Menunggu registrasi jaringan");
+  for (int j = 0; j < 45; j++) {
+    String creg = sendAT("AT+CREG?", 2000);
+    // +CREG: 0,1 = home network, +CREG: 0,5 = roaming
+    if (creg.indexOf(",1") != -1 || creg.indexOf(",5") != -1) {
+      Serial.println(" ✓ Terdaftar.");
+
+      // Tampilkan info sinyal dan operator
+      String csq = sendAT("AT+CSQ", 1000);
+      String cops = sendAT("AT+COPS?", 2000);
+      Serial.printf("[SIM800L] Sinyal: %s\n", csq.c_str());
+      Serial.printf("[SIM800L] Operator: %s\n", cops.c_str());
+      return true;
+    }
+    Serial.print(".");
+    delay(1000);
+  }
+
+  Serial.println("\n[SIM800L] ✗ Timeout registrasi jaringan.");
+  Serial.println("[SIM800L] ✗ Pastikan sinyal operator tersedia di lokasi ini.");
   return false;
 }
 
