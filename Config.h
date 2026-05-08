@@ -16,18 +16,6 @@
  * deep sleep parameters, and Firebase endpoint configurations.
  */
 
-/* =================================================================
- * BUILD MODE SELECTION
- * =================================================================
- * Define USE_WIFI for testing with WiFi + HTTPClient.
- * Comment out to use SIM800L GPRS (production/field deployment).
- */
-// #define USE_WIFI  // ← Commented out: Using SIM800L only
-
-#ifdef USE_WIFI
-static const char *WIFI_SSID = "No Internet Connection";
-static const char *WIFI_PASS = "Loupatty143";
-#endif
 
 /* =================================================================
  * HARDWARE PIN DEFINITIONS
