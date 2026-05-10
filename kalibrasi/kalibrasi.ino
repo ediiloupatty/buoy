@@ -43,16 +43,20 @@ DallasTemperature tempSensor(&oneWire);
 Preferences preferences;
 
 // ── pH Calibration State ────────────────────────────────────────────────────
-float calM = -4.79f;
-float calB = 18.06f;
+float calV4 = 3.03f;
+float calV7 = 2.50f;
+float calV9 = 2.08f;
 
 float cal4Voltage = 0.0f;
 float cal7Voltage = 0.0f;
+float cal9Voltage = 0.0f;
 bool  cal4Set     = false;
 bool  cal7Set     = false;
+bool  cal9Set     = false;
 
 const float PH_REF_4 = 4.01f;
 const float PH_REF_7 = 6.86f;
+const float PH_REF_9 = 9.18f;
 
 // ── ADC Configuration ───────────────────────────────────────────────────────
 const int ADC_SAMPLES        = 10;
@@ -110,7 +114,17 @@ float readTemperature() {
 
 float readPH(float tempC) {
   float voltage = readTrimmedMeanVoltage(PH_PIN);
-  float rawPH = (calM * voltage) + calB;
+  float m, b;
+  
+  if (voltage > calV7) {
+    m = (PH_REF_7 - PH_REF_4) / (calV7 - calV4);
+    b = PH_REF_7 - (m * calV7);
+  } else {
+    m = (PH_REF_9 - PH_REF_7) / (calV9 - calV7);
+    b = PH_REF_7 - (m * calV7);
+  }
+  
+  float rawPH = (m * voltage) + b;
 
   // Nernst temperature compensation
   if (tempC > -126.0f) {
@@ -151,39 +165,49 @@ void handleCommand(String cmd) {
     Serial.printf("  ✓ ADC ~ %d\n", (int)(cal7Voltage / 3.3f * 4095.0f));
     Serial.println("  → Lanjutkan: ketik CALSAVE untuk menghitung & menyimpan kalibrasi");
 
+  } else if (cmd == "CAL9") {
+    Serial.println("\n╔══════════════════════════════════════╗");
+    Serial.println("║   KALIBRASI pH 9.18 — Sampling...    ║");
+    Serial.println("╚══════════════════════════════════════╝");
+
+    cal9Voltage = readTrimmedMeanVoltage(PH_PIN);
+    cal9Set = true;
+
+    Serial.printf("  ✓ Tegangan tercatat: %.4f V\n", cal9Voltage);
+    Serial.printf("  ✓ ADC ~ %d\n", (int)(cal9Voltage / 3.3f * 4095.0f));
+    Serial.println("  → Lanjutkan: ketik CALSAVE untuk menyimpan kalibrasi 3-titik");
+
   } else if (cmd == "CALSAVE") {
-    if (!cal4Set || !cal7Set) {
-      Serial.println("\n  ✗ ERROR: Kedua titik kalibrasi harus diambil terlebih dahulu!");
-      Serial.println("    Jalankan CAL4 dan CAL7 sebelum CALSAVE.");
+    if (!cal4Set || !cal7Set || !cal9Set) {
+      Serial.println("\n  ✗ ERROR: Ketiga titik kalibrasi (4.01, 6.86, 9.18) harus diambil terlebih dahulu!");
+      Serial.println("    Jalankan CAL4, CAL7, dan CAL9 sebelum CALSAVE.");
       return;
     }
 
-    float deltaV = cal7Voltage - cal4Voltage;
-    if (abs(deltaV) < 0.001f) {
-      Serial.println("\n  ✗ ERROR: Tegangan kedua buffer terlalu mirip!");
+    if (abs(cal7Voltage - cal4Voltage) < 0.001f || abs(cal9Voltage - cal7Voltage) < 0.001f) {
+      Serial.println("\n  ✗ ERROR: Tegangan antar buffer terlalu mirip!");
       return;
     }
-
-    float newM = (PH_REF_7 - PH_REF_4) / deltaV;
-    float newB = PH_REF_4 - (newM * cal4Voltage);
 
     preferences.begin("ph_cal", false);
-    preferences.putFloat("m", newM);
-    preferences.putFloat("b", newB);
+    preferences.putFloat("v4", cal4Voltage);
+    preferences.putFloat("v7", cal7Voltage);
+    preferences.putFloat("v9", cal9Voltage);
     preferences.end();
 
-    calM = newM;
-    calB = newB;
+    calV4 = cal4Voltage;
+    calV7 = cal7Voltage;
+    calV9 = cal9Voltage;
     cal4Set = false;
     cal7Set = false;
+    cal9Set = false;
 
     Serial.println("\n╔══════════════════════════════════════╗");
     Serial.println("║    ✓ KALIBRASI BERHASIL DISIMPAN     ║");
     Serial.println("╠══════════════════════════════════════╣");
-    Serial.printf("║  V(pH4) = %.4f V                    ║\n", cal4Voltage);
-    Serial.printf("║  V(pH7) = %.4f V                    ║\n", cal7Voltage);
-    Serial.printf("║  Slope (m)     = %.4f              ║\n", calM);
-    Serial.printf("║  Intercept (b) = %.4f              ║\n", calB);
+    Serial.printf("║  V(pH4) = %.4f V                    ║\n", calV4);
+    Serial.printf("║  V(pH7) = %.4f V                    ║\n", calV7);
+    Serial.printf("║  V(pH9) = %.4f V                    ║\n", calV9);
     Serial.println("╠══════════════════════════════════════╣");
     Serial.println("║  Data tersimpan di NVS Flash.        ║");
     Serial.println("║  Upload firmware utama — nilai       ║");
@@ -192,14 +216,16 @@ void handleCommand(String cmd) {
 
   } else if (cmd == "CALINFO") {
     Serial.println("\n═══════════════════════════════════════");
-    Serial.println("  STATUS KALIBRASI pH");
+    Serial.println("  STATUS KALIBRASI pH (3-Point)");
     Serial.println("═══════════════════════════════════════");
-    Serial.printf("  Slope (m)     = %.4f\n", calM);
-    Serial.printf("  Intercept (b) = %.4f\n", calB);
-    Serial.printf("  Sesi aktif    : CAL4=%s, CAL7=%s\n",
-                  cal4Set ? "✓" : "—", cal7Set ? "✓" : "—");
-    if (cal4Set) Serial.printf("  V(pH4) = %.4f V\n", cal4Voltage);
-    if (cal7Set) Serial.printf("  V(pH7) = %.4f V\n", cal7Voltage);
+    Serial.printf("  V(pH4) = %.4f V\n", calV4);
+    Serial.printf("  V(pH7) = %.4f V\n", calV7);
+    Serial.printf("  V(pH9) = %.4f V\n", calV9);
+    Serial.printf("  Sesi aktif    : CAL4=%s, CAL7=%s, CAL9=%s\n",
+                  cal4Set ? "✓" : "—", cal7Set ? "✓" : "—", cal9Set ? "✓" : "—");
+    if (cal4Set) Serial.printf("  V(pH4_temp) = %.4f V\n", cal4Voltage);
+    if (cal7Set) Serial.printf("  V(pH7_temp) = %.4f V\n", cal7Voltage);
+    if (cal9Set) Serial.printf("  V(pH9_temp) = %.4f V\n", cal9Voltage);
     Serial.println("═══════════════════════════════════════");
 
   } else if (cmd == "READ") {
@@ -208,7 +234,7 @@ void handleCommand(String cmd) {
 
   } else if (cmd.length() > 0) {
     Serial.println("\n  Perintah tidak dikenal.");
-    Serial.println("  Gunakan: CAL4 | CAL7 | CALSAVE | CALINFO | READ");
+    Serial.println("  Gunakan: CAL4 | CAL7 | CAL9 | CALSAVE | CALINFO | READ");
   }
 }
 
@@ -224,19 +250,22 @@ void setup() {
 
   // Load existing calibration from NVS
   preferences.begin("ph_cal", true);
-  calM = preferences.getFloat("m", -4.79f);
-  calB = preferences.getFloat("b", 18.06f);
+  calV4 = preferences.getFloat("v4", 3.03f);
+  calV7 = preferences.getFloat("v7", 2.50f);
+  calV9 = preferences.getFloat("v9", 2.08f);
   preferences.end();
 
   Serial.println("\n╔══════════════════════════════════════╗");
   Serial.println("║  SMART BUOY — pH CALIBRATION TOOL    ║");
   Serial.println("╠══════════════════════════════════════╣");
-  Serial.printf("║  Slope (m)     = %.4f              ║\n", calM);
-  Serial.printf("║  Intercept (b) = %.4f              ║\n", calB);
+  Serial.printf("║  V(pH4) = %.4f V                    ║\n", calV4);
+  Serial.printf("║  V(pH7) = %.4f V                    ║\n", calV7);
+  Serial.printf("║  V(pH9) = %.4f V                    ║\n", calV9);
   Serial.println("╠══════════════════════════════════════╣");
   Serial.println("║  Perintah:                           ║");
   Serial.println("║    CAL4    — Kalibrasi buffer pH 4   ║");
   Serial.println("║    CAL7    — Kalibrasi buffer pH 7   ║");
+  Serial.println("║    CAL9    — Kalibrasi buffer pH 9   ║");
   Serial.println("║    CALSAVE — Simpan kalibrasi        ║");
   Serial.println("║    CALINFO — Status kalibrasi        ║");
   Serial.println("║    READ    — Toggle baca sensor      ║");

@@ -1,6 +1,6 @@
 # 🔬 Panduan Kalibrasi Sensor pH — Smart Buoy IoT System
 
-Dokumen ini menjelaskan prosedur kalibrasi **Two-Point Linear Calibration** untuk sensor pH analog pada sistem Smart Buoy. Kalibrasi dilakukan melalui Serial Monitor dan hasilnya tersimpan permanen di memori flash ESP32 (NVS).
+Dokumen ini menjelaskan prosedur kalibrasi **Three-Point Piecewise Linear Calibration** untuk sensor pH analog pada sistem Smart Buoy. Kalibrasi dilakukan melalui Serial Monitor dan hasilnya tersimpan permanen di memori flash ESP32 (NVS).
 
 ---
 
@@ -10,8 +10,9 @@ Dokumen ini menjelaskan prosedur kalibrasi **Two-Point Linear Calibration** untu
 |----|------|------------|
 | 1 | **Larutan Buffer pH 4.01** | Larutan standar asam (warna merah/kuning) |
 | 2 | **Larutan Buffer pH 6.86** | Larutan standar netral (warna hijau/biru) |
-| 3 | **Aquades (Air Suling)** | Untuk membilas sensor antara pengukuran |
-| 4 | **Gelas Beaker / Wadah Bersih** | Minimal 3 buah (masing-masing untuk buffer dan bilas) |
+| 3 | **Larutan Buffer pH 9.18** | Larutan standar basa (warna biru/ungu) |
+| 4 | **Aquades (Air Suling)** | Untuk membilas sensor antara pengukuran |
+| 5 | **Gelas Beaker / Wadah Bersih** | Minimal 4 buah (masing-masing untuk buffer dan bilas) |
 | 5 | **Tisu / Kain Lembut** | Untuk mengeringkan probe sebelum pindah larutan |
 | 6 | **Laptop + Kabel USB** | Untuk koneksi Serial Monitor ke ESP32 |
 | 7 | **Smart Buoy (ESP32 + Sensor pH)** | Perangkat yang akan dikalibrasi |
@@ -44,7 +45,8 @@ Dokumen ini menjelaskan prosedur kalibrasi **Two-Point Linear Calibration** untu
 ### 2.3 Persiapan Larutan
 1. Tuangkan larutan **buffer pH 4.01** ke gelas beaker pertama.
 2. Tuangkan larutan **buffer pH 6.86** ke gelas beaker kedua.
-3. Siapkan gelas beaker ketiga berisi **aquades** untuk membilas.
+3. Tuangkan larutan **buffer pH 9.18** ke gelas beaker ketiga.
+4. Siapkan gelas beaker keempat berisi **aquades** untuk membilas.
 4. Biarkan semua larutan berada pada **suhu ruangan** (±25°C) selama minimal 10 menit.
 
 ---
@@ -62,13 +64,14 @@ CALINFO
 Output yang diharapkan:
 ```
 ═══════════════════════════════════════
-  STATUS KALIBRASI pH
+  STATUS KALIBRASI pH (3-Point)
 ═══════════════════════════════════════
-  Slope (m)     = -4.7900
-  Intercept (b) = 18.0600
-  Sesi aktif    : CAL4=—, CAL7=—
+  V(pH4) = 3.0300 V
+  V(pH7) = 2.5000 V
+  V(pH9) = 2.0800 V
+  Sesi aktif    : CAL4=—, CAL7=—, CAL9=—
 ═══════════════════════════════════════
-  Perintah: CAL4 | CAL7 | CALSAVE | CALINFO
+  Perintah: CAL4 | CAL7 | CAL9 | CALSAVE | CALINFO | READ
 ═══════════════════════════════════════
 ```
 
@@ -139,7 +142,7 @@ Output yang diharapkan:
    ╚══════════════════════════════════════╝
      ✓ Tegangan tercatat: 2.3350 V
      ✓ ADC ~ 2896
-     → Lanjutkan: ketik CALSAVE untuk menghitung & menyimpan kalibrasi
+     → Lanjutkan: ketik CAL9 untuk kalibrasi titik basa
    ```
 
 5. **Catat** nilai tegangan:
@@ -151,7 +154,43 @@ Output yang diharapkan:
 
 ---
 
-### 📋 Step 5 — Simpan Kalibrasi
+### 📋 Step 5 — Bilas Sensor
+
+1. **Angkat** probe dari larutan buffer pH 6.86.
+2. **Celupkan** probe ke dalam aquades selama 10-15 detik.
+3. **Keringkan** permukaan probe dengan tisu.
+
+---
+
+### 📋 Step 6 — Kalibrasi Titik pH 9.18 (Buffer Basa)
+
+1. **Celupkan** probe ke dalam larutan **buffer pH 9.18**.
+2. **Tunggu 2-3 menit** hingga pembacaan stabil.
+3. Setelah stabil, ketik di Serial Monitor:
+   ```
+   CAL9
+   ```
+
+4. Output yang diharapkan:
+   ```
+   ╔══════════════════════════════════════╗
+   ║   KALIBRASI pH 9.18 — Sampling...    ║
+   ╚══════════════════════════════════════╝
+     ✓ Tegangan tercatat: 2.0800 V
+     ✓ ADC ~ 2580
+     → Lanjutkan: ketik CALSAVE untuk menyimpan kalibrasi 3-titik
+   ```
+
+5. **Catat** nilai tegangan:
+
+   | Parameter | Nilai |
+   |-----------|-------|
+   | Tegangan pH 9.18 | ........ V |
+   | ADC pH 9.18 | ........ |
+
+---
+
+### 📋 Step 7 — Simpan Kalibrasi
 
 Ketik perintah berikut untuk menghitung dan menyimpan nilai kalibrasi:
 
@@ -166,19 +205,16 @@ Output yang diharapkan:
 ╠══════════════════════════════════════╣
 ║  V(pH4) = 2.9312 V                  ║
 ║  V(pH7) = 2.3350 V                  ║
-║  Slope (m)     = -4.7819            ║
-║  Intercept (b) = 18.0216            ║
+║  V(pH9) = 2.0800 V                  ║
 ╠══════════════════════════════════════╣
 ║  Data tersimpan di NVS Flash.        ║
-║  Restart aman — nilai tidak hilang.  ║
+║  Sistem menggunakan Piecewise Linear.║
 ╚══════════════════════════════════════╝
 ```
 
-> Sistem akan menghitung **slope (m)** dan **intercept (b)** menggunakan rumus:
-> ```
-> m = (pH₂ - pH₁) / (V₂ - V₁) = (6.86 - 4.01) / (V_pH7 - V_pH4)
-> b = pH₁ - (m × V_pH4)        = 4.01 - (m × V_pH4)
-> ```
+> Sistem akan menyimpan nilai mentah voltase. Saat berjalan, alat menggunakan **Piecewise Linear Interpolation**.
+> - Jika pH < 7: menggunakan slope antara pH 4 dan 7.
+> - Jika pH > 7: menggunakan slope antara pH 7 dan 9.
 
 ---
 
