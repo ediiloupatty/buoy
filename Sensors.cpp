@@ -28,9 +28,9 @@ Preferences preferences;
 
 // ── pH Calibration State ──────────────────────────────────────────────────────
 // Default voltage values at given reference pH (roughly 2.5V at pH 7, ~-0.18V/pH)
-float calV4 = 3.03f;   ///< Voltage at pH 4.01
-float calV7 = 2.50f;   ///< Voltage at pH 6.86
-float calV9 = 2.08f;   ///< Voltage at pH 9.18
+float calV4 = 3.3000f;   ///< Voltage at pH 4.01
+float calV7 = 0.3492f;   ///< Voltage at pH 6.86
+float calV9 = 3.3000f;   ///< Voltage at pH 9.18
 
 // Temporary calibration buffer (populated during interactive calibration session)
 float cal4Voltage = 0.0f;  ///< Recorded voltage at pH 4.01 buffer
@@ -62,9 +62,9 @@ void initSensors() {
 
 void loadCalibration() {
   preferences.begin("ph_cal", true);  // Read-only mode
-  calV4 = preferences.getFloat("v4", 3.03f);
-  calV7 = preferences.getFloat("v7", 2.50f);
-  calV9 = preferences.getFloat("v9", 2.08f);
+  calV4 = preferences.getFloat("v4", 3.3000f);
+  calV7 = preferences.getFloat("v7", 0.3492f);
+  calV9 = preferences.getFloat("v9", 3.3000f);
   preferences.end();
 
   Serial.println("═══════════════════════════════════════");

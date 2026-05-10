@@ -32,9 +32,9 @@ LiquidCrystal_I2C lcd(0x27, 16, 2);
 Preferences preferences;
 
 // ── Calibration State ────────────────────────────────────────────────────────
-float calV4 = 3.03f;
-float calV7 = 2.50f;
-float calV9 = 2.08f;
+float calV4 = 3.3000f;
+float calV7 = 0.3492f;
+float calV9 = 3.3000f;
 
 float cal4Voltage = 0.0f;
 float cal7Voltage = 0.0f;
@@ -308,9 +308,9 @@ void setup() {
   analogSetAttenuation(ADC_11db);
 
   preferences.begin("ph_cal", true);
-  calV4 = preferences.getFloat("v4", 3.03f);
-  calV7 = preferences.getFloat("v7", 2.50f);
-  calV9 = preferences.getFloat("v9", 2.08f);
+  calV4 = preferences.getFloat("v4", 3.3000f);
+  calV7 = preferences.getFloat("v7", 0.3492f);
+  calV9 = preferences.getFloat("v9", 3.3000f);
   preferences.end();
 
   Serial.println("\n╔══════════════════════════════════════╗");
