@@ -51,8 +51,8 @@
  * WIFI CONFIGURATION
  * ==========================================
  */
-#define WIFI_SSID "SSID_ANDA"
-#define WIFI_PASS "PASSWORD_ANDA"
+#define WIFI_SSID "No Internet Connection"
+#define WIFI_PASS "Loupatty143"
 
 /* ==========================================
  * DEEP SLEEP CONFIGURATION

@@ -36,7 +36,6 @@ void loadCalibration();
  * Supported commands:
  * - "CAL4"    : Record voltage at pH 4.01 buffer
  * - "CAL7"    : Record voltage at pH 6.86 buffer
- * - "CAL9"    : Record voltage at pH 9.18 buffer
  * - "CALSAVE" : Calculate & persist to NVS
  * - "CALINFO" : Print current calibration status
  * 
