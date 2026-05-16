@@ -50,12 +50,12 @@ const int   daylightOffset_sec = 0;
 RTC_DATA_ATTR int   bootCount = 0;          ///< Tracks number of wake cycles
 RTC_DATA_ATTR float lastSentPH   = -100.0;  ///< Last pH value sent to Firebase
 RTC_DATA_ATTR float lastSentTemp = -100.0;  ///< Last temperature sent to Firebase
-RTC_DATA_ATTR int   lastSentTurb = -100;    ///< Last turbidity sent to Firebase
+RTC_DATA_ATTR float lastSentTurb = -100.0;  ///< Last turbidity sent to Firebase
 
 // Global Telemetry State (current reading)
 float  phValue   = 0;
 float  tempC     = 0;
-int    turbidity = 0;
+float  turbidity = 0;
 String kondisi   = "";
 
 // ── Forward Declarations ─────────────────────────────────────────────────────
@@ -94,10 +94,10 @@ void setup() {
   // 2. Read Sensors (temperature first — required for pH compensation)
   tempC     = readTemperature();
   phValue   = readPH(tempC);
-  turbidity = readTurbidityValue();
+  turbidity = readTurbidityNTU();
   kondisi   = getTurbidityStatus(turbidity);
 
-  Serial.printf("[Sensor] Suhu=%.1f°C | pH=%.2f | Turb=%d (%s)\n",
+  Serial.printf("[Sensor] Suhu=%.1f°C | pH=%.2f | Turb=%.1f NTU (%s)\n",
                 tempC, phValue, turbidity, kondisi.c_str());
 
   // 3. Initialize Network Connection
@@ -121,14 +121,14 @@ void setup() {
   bool shouldSendLive = false;
   if (abs(phValue - lastSentPH) > 0.05 ||
       abs(tempC - lastSentTemp) > 0.1  ||
-      abs(turbidity - lastSentTurb) > 5) {
+      abs(turbidity - lastSentTurb) > 5.0f) {
     shouldSendLive = true;
   }
 
   if (shouldSendLive) {
     String liveJson = "{\"pH\":" + String(phValue, 2) +
                       ",\"temp\":" + String(tempC, 1) +
-                      ",\"turb\":" + String(turbidity) + "}";
+                      ",\"turb\":" + String(turbidity, 1) + "}";
 
     if (sendFirebasePUT("/smart_buoy/live", liveJson)) {
       Serial.println("[Firebase Live] ✓ Data terkirim.");
@@ -148,7 +148,7 @@ void setup() {
 
     String historyJson = "{\"pH\":" + String(phValue, 2) +
                          ",\"temp\":" + String(tempC, 1) +
-                         ",\"turb\":" + String(turbidity) +
+                         ",\"turb\":" + String(turbidity, 1) +
                          ",\"ts\":" + String(timestamp) + "}";
 
     if (sendFirebasePOST("/smart_buoy/history", historyJson)) {

@@ -64,16 +64,16 @@ float readPH(float tempC);
 float readTemperature();
 
 /**
- * @brief Reads the raw ADC value from the turbidity sensor.
- * @return Raw ADC integer value (0-4095).
+ * @brief Reads the calibrated NTU value from the turbidity sensor.
+ * @return Calibrated turbidity value in NTU (float).
  */
-int readTurbidityValue();
+float readTurbidityNTU();
 
 /**
- * @brief Computes a qualitative state based on the raw turbidity value.
- * @param turbidityValue The raw ADC value from the turbidity sensor.
+ * @brief Computes a qualitative state based on the calibrated turbidity value.
+ * @param ntuValue The NTU value from the turbidity sensor.
  * @return String representing the qualitative state ("Jernih", "Keruh", "Kotor").
  */
-String getTurbidityStatus(int turbidityValue);
+String getTurbidityStatus(float ntuValue);
 
 #endif // SENSORS_H
