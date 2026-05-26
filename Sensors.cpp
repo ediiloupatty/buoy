@@ -8,8 +8,9 @@
 /**
  * @file Sensors.cpp
  * @brief Implementation of sensor polling, calibration, and signal processing logic.
- * 
+ *
  * pH Calibration Method: Two-Point Linear Calibration with Nernst Temperature Compensation.
+ * Turbidity Calibration Method: Three-Point Piecewise Linear (anchors at 0, 70, 400 NTU).
  * Calibration values are persisted in ESP32 NVS (Non-Volatile Storage) flash memory.
  */
 
@@ -41,17 +42,12 @@ bool  cal7Set     = false;  ///< Flag: pH 6.86 point captured
 const float PH_REF_4 = 4.01f;
 const float PH_REF_7 = 6.86f;
 
-// ── Turbidity Calibration State ───────────────────────────────────────────────
-float calTurbV0 = 3.3f;    ///< Voltage at 0 NTU (Clear Water)
-float calTurbV400 = 1.0f;  ///< Voltage at 400 NTU (Turbid Water)
-
-float calTurb0Voltage = 0.0f;
-float calTurb400Voltage = 0.0f;
-bool  calTurb0Set     = false;
-bool  calTurb400Set   = false;
-
-const float TURB_REF_0   = 0.0f;
-const float TURB_REF_400 = 400.0f;
+// ── Turbidity Calibration (2-Point Hardcoded) ────────────────────────────────
+// Sinkron dengan kalibrasi/kalibrasi.ino.
+// 3.30 V -> 0 NTU (jernih), 2.26 V -> 400 NTU (keruh).
+const float TURB_V_CLEAR  = 3.30f;
+const float TURB_V_TURBID = 2.26f;
+const float TURB_NTU_MAX  = 400.0f;
 
 // ── ADC Sampling Configuration ────────────────────────────────────────────────
 const int   ADC_SAMPLES     = 10;    ///< Total samples per reading
@@ -74,19 +70,16 @@ void loadCalibration() {
   calV7 = preferences.getFloat("v7", 2.6890f);
   preferences.end();
 
-  preferences.begin("turb_cal", true);
-  calTurbV0 = preferences.getFloat("v0", 3.3f);
-  calTurbV400 = preferences.getFloat("v400", 1.0f);
-  preferences.end();
+  // Turbidity kalibrasi di-hardcode (TURB_V_CLEAR / TURB_V_TURBID), tidak baca NVS.
 
   Serial.println("═══════════════════════════════════════");
-  Serial.println("  Sensor Calibration Loaded from NVS");
-  Serial.println("  -- pH (2-Point) --");
+  Serial.println("  Sensor Calibration Loaded");
+  Serial.println("  -- pH (2-Point, dari NVS) --");
   Serial.printf("  V(pH 4.01) = %.4f V\n", calV4);
   Serial.printf("  V(pH 6.86) = %.4f V\n", calV7);
-  Serial.println("  -- Turbidity (2-Point) --");
-  Serial.printf("  V(0 NTU)   = %.4f V\n", calTurbV0);
-  Serial.printf("  V(400 NTU) = %.4f V\n", calTurbV400);
+  Serial.println("  -- Turbidity (2-Point, HARDCODED) --");
+  Serial.printf("  V(0   NTU) = %.4f V\n", TURB_V_CLEAR);
+  Serial.printf("  V(400 NTU) = %.4f V\n", TURB_V_TURBID);
   Serial.println("═══════════════════════════════════════");
 }
 
@@ -193,19 +186,17 @@ float readTemperature() {
 // Turbidity Sensor Reading
 // ──────────────────────────────────────────────────────────────────────────────
 
+// Linear 2-titik hardcoded:
+//   (TURB_V_CLEAR, 0 NTU) -> (TURB_V_TURBID, 400 NTU)
+// SEN0189: turbiditas naik => voltase turun.
 float readTurbidityNTU() {
   float voltage = readTrimmedMeanVoltage(TURB_PIN);
-  
-  if (abs(calTurbV0 - calTurbV400) < 0.001f) return 0.0f;
 
-  float m = (TURB_REF_400 - TURB_REF_0) / (calTurbV400 - calTurbV0);
-  float b = TURB_REF_400 - (m * calTurbV400);
-  
-  float ntu = (m * voltage) + b;
-  
+  float m = TURB_NTU_MAX / (TURB_V_TURBID - TURB_V_CLEAR);
+  float ntu = m * (voltage - TURB_V_CLEAR);
+
   if (ntu < 0.0f) ntu = 0.0f;
   if (ntu > 3000.0f) ntu = 3000.0f;
-  
   return ntu;
 }
 
@@ -301,66 +292,18 @@ void handleCalibrationCommand(String cmd) {
                   cal4Set ? "✓" : "—", cal7Set ? "✓" : "—");
     if (cal4Set) Serial.printf("  V(pH4_temp) = %.4f V\n", cal4Voltage);
     if (cal7Set) Serial.printf("  V(pH7_temp) = %.4f V\n", cal7Voltage);
-    Serial.println("  -- Turbidity (2-Point) --");
-    Serial.printf("  V(0 NTU)   = %.4f V\n", calTurbV0);
-    Serial.printf("  V(400 NTU) = %.4f V\n", calTurbV400);
-    Serial.printf("  Sesi aktif: TCAL0=%s, TCAL400=%s\n",
-                  calTurb0Set ? "✓" : "—", calTurb400Set ? "✓" : "—");
-    if (calTurb0Set) Serial.printf("  V(0_temp)   = %.4f V\n", calTurb0Voltage);
-    if (calTurb400Set) Serial.printf("  V(400_temp) = %.4f V\n", calTurb400Voltage);
+    Serial.println("  -- Turbidity (2-Point HARDCODED) --");
+    Serial.printf("  V(0   NTU) = %.4f V\n", TURB_V_CLEAR);
+    Serial.printf("  V(400 NTU) = %.4f V\n", TURB_V_TURBID);
     Serial.println("═══════════════════════════════════════");
-    Serial.println("  Perintah: CAL4 | CAL7 | CALSAVE | TCAL0 | TCAL400 | TCALSAVE | CALINFO");
+    Serial.println("  pH:   CAL4 | CAL7 | CALSAVE");
+    Serial.println("  Info: CALINFO");
+    Serial.println("  (Turbidity hardcoded di Sensors.cpp - TCAL* dinonaktifkan)");
     Serial.println("═══════════════════════════════════════");
 
-  // ── TCAL0: Record voltage at 0 NTU ──
-  } else if (cmd == "TCAL0") {
-    Serial.println("\n╔══════════════════════════════════════╗");
-    Serial.println("║  KALIBRASI TURBIDITY 0 NTU Sampling  ║");
-    Serial.println("╚══════════════════════════════════════╝");
-    calTurb0Voltage = readTrimmedMeanVoltage(TURB_PIN);
-    calTurb0Set = true;
-    Serial.printf("  ✓ Tegangan tercatat: %.4f V\n", calTurb0Voltage);
-    Serial.printf("  ✓ ADC ~ %d\n", (int)(calTurb0Voltage / 3.3f * 4095.0f));
-    Serial.println("  → Lanjutkan: celupkan ke air 400 NTU, lalu ketik TCAL400");
-
-  // ── TCAL400: Record voltage at 400 NTU ──
-  } else if (cmd == "TCAL400") {
-    Serial.println("\n╔══════════════════════════════════════╗");
-    Serial.println("║ KALIBRASI TURBIDITY 400 NTU Sampling ║");
-    Serial.println("╚══════════════════════════════════════╝");
-    calTurb400Voltage = readTrimmedMeanVoltage(TURB_PIN);
-    calTurb400Set = true;
-    Serial.printf("  ✓ Tegangan tercatat: %.4f V\n", calTurb400Voltage);
-    Serial.printf("  ✓ ADC ~ %d\n", (int)(calTurb400Voltage / 3.3f * 4095.0f));
-    Serial.println("  → Lanjutkan: ketik TCALSAVE");
-
-  // ── TCALSAVE: Persist Turbidity to NVS ──
-  } else if (cmd == "TCALSAVE") {
-    if (!calTurb0Set || !calTurb400Set) {
-      Serial.println("\n  ✗ ERROR: Kedua titik kalibrasi (0, 400) harus diambil terlebih dahulu!");
-      Serial.println("    Jalankan TCAL0 dan TCAL400 sebelum TCALSAVE.");
-      return;
-    }
-    if (abs(calTurb0Voltage - calTurb400Voltage) < 0.001f) {
-      Serial.println("\n  ✗ ERROR: Tegangan antar buffer terlalu mirip!");
-      return;
-    }
-    
-    preferences.begin("turb_cal", false);
-    preferences.putFloat("v0", calTurb0Voltage);
-    preferences.putFloat("v400", calTurb400Voltage);
-    preferences.end();
-
-    calTurbV0 = calTurb0Voltage;
-    calTurbV400 = calTurb400Voltage;
-    calTurb0Set = false;
-    calTurb400Set = false;
-
-    Serial.println("\n╔══════════════════════════════════════╗");
-    Serial.println("║    ✓ KALIBRASI TURBIDITY DISIMPAN    ║");
-    Serial.println("╠══════════════════════════════════════╣");
-    Serial.printf("║  V(0 NTU)   = %.4f V                ║\n", calTurbV0);
-    Serial.printf("║  V(400 NTU) = %.4f V                ║\n", calTurbV400);
-    Serial.println("╚══════════════════════════════════════╝");
+  // ── TCAL*/TCALSAVE: dinonaktifkan karena turbidity di-hardcode ──
+  } else if (cmd == "TCAL0" || cmd == "TCAL70" || cmd == "TCAL400" || cmd == "TCALSAVE") {
+    Serial.println("\n  ⚠ Kalibrasi turbidity di-hardcode di Sensors.cpp.");
+    Serial.println("    Ubah TURB_V_CLEAR / TURB_V_TURBID lalu re-flash untuk mengganti.");
   }
 }
