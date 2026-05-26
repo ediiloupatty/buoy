@@ -8,25 +8,21 @@
 /**
  * @file final_project.ino
  * @brief Core application logic for the Smart Buoy IoT System.
- * 
- * Handles connectivity (WiFi or SIM800L GPRS), timestamping,
- * deep sleep power management, and dual-pipeline Firebase REST API telemetry.
- * 
- * Connectivity:
- *   - SIM800L GPRS + AT Commands (production/field)
- * 
- * Execution Model:
- *   - ESP32 wakes from deep sleep every 2 minutes
- *   - Reads all sensors
- *   - Sends live data to Firebase via HTTPS
- *   - Every 5th boot (~10 minutes), also pushes historical data
- *   - Returns to deep sleep
- * 
- * Note: pH sensor calibration is handled by a separate dedicated sketch
- *       located in the kalibrasi/ directory.
+ *
+ * Execution Model — AUTO-CYCLE, ALWAYS-ON:
+ *   - Power-on → setup() init hardware, langsung mulai siklus FILLING
+ *   - loop() jalan terus dengan state machine 3 fase:
+ *       FILLING (60s) → WAITING (15s/15m) → DRAINING (40s) → FILLING → ...
+ *   - Pompa 1 (ISI) & Pompa 2 (BUANG) interlocked — tidak pernah ON bersamaan
+ *   - Sensor dibaca + dikirim ke Firebase tiap 30 detik (kalau WiFi connected)
+ *   - WiFi auto-reconnect kalau terputus
+ *   - Mobile app HANYA untuk monitoring (read /live, /pump_status) — tidak ada command
+ *
+ * Note: pH sensor calibration di sketch terpisah (kalibrasi/).
  */
 
 #include <time.h>
+#include "driver/rtc_io.h"  // gpio_hold_en/dis untuk kunci state relay saat deep sleep
 
 // Custom Hardware Modules
 #include "Config.h"
@@ -52,6 +48,11 @@ RTC_DATA_ATTR float lastSentPH   = -100.0;  ///< Last pH value sent to Firebase
 RTC_DATA_ATTR float lastSentTemp = -100.0;  ///< Last temperature sent to Firebase
 RTC_DATA_ATTR float lastSentTurb = -100.0;  ///< Last turbidity sent to Firebase
 
+// Pump state machine — auto-cycle FILLING → WAITING → DRAINING → loop
+// ESP32 always-on, mulai otomatis dari FILLING saat power on.
+// Mobile app hanya monitoring (tidak ada command/button).
+RTC_DATA_ATTR int pumpState = PUMP_IDLE;  // di-set ke FILLING di setup()
+
 // Global Telemetry State (current reading)
 float  phValue   = 0;
 float  tempC     = 0;
@@ -59,7 +60,15 @@ float  turbidity = 0;
 String kondisi   = "";
 
 // ── Forward Declarations ─────────────────────────────────────────────────────
-void enterDeepSleep();
+void applyPumpRelay(int state);
+unsigned long getPumpStateDuration(int state);
+int nextPumpState(int state);
+const char* currentPumpLabel();
+const char* pumpStateLabel(int state);
+bool   sendPumpStatus(const String &tsStr);
+bool   sendLiveTelemetry(const String &tsStr);
+bool   sendHistoryTelemetry(const String &tsStr);
+String getTimestampString();
 
 // bool   initSIM800L();
 // void   resetSIM800L();
@@ -72,7 +81,7 @@ bool   sendFirebasePOST(const String &path, const String &json);
 bool   sendFirebaseHTTP(const String &path, const String &json, int method);
 // String sendAT(const String &cmd, unsigned long timeoutMs = 2000);
 // bool   waitForResponse(const String &expected, unsigned long timeoutMs = 2000);
-unsigned long getNetworkTimestamp();
+uint64_t getNetworkTimestamp();
 
 // =============================================================================
 // SETUP — Main execution path (runs on every wake from deep sleep)
@@ -84,110 +93,239 @@ void setup() {
   bootCount++;
   Serial.println("\n══════════════════════════════════════════");
   Serial.printf("  Smart Buoy IoT — Boot #%d\n", bootCount);
-  Serial.println("  [MODE: WiFi Production]");
+  Serial.println("  [MODE: Auto-Cycle Always-On]");
   Serial.println("══════════════════════════════════════════");
 
-  // 1. Initialize Hardware Abstraction Layer
+  // 1. Initialize Hardware
   initSensors();
   loadCalibration();
 
-  // 2. Read Sensors (temperature first — required for pH compensation)
+  // 2. Init pin relay & langsung set fase awal: FILLING (pompa 1 ON, pompa 2 OFF)
+  pinMode(PUMP_FILL_PIN,  OUTPUT);
+  pinMode(PUMP_DRAIN_PIN, OUTPUT);
+  pumpState = PUMP_FILLING;
+  applyPumpRelay(pumpState);
+  Serial.printf("[Pump] Siklus mulai — fase awal: %s\n", currentPumpLabel());
+
+  // 3. Baca sensor pertama
   tempC     = readTemperature();
   phValue   = readPH(tempC);
   turbidity = readTurbidityNTU();
   kondisi   = getTurbidityStatus(turbidity);
-
   Serial.printf("[Sensor] Suhu=%.1f°C | pH=%.2f | Turb=%.1f NTU (%s)\n",
                 tempC, phValue, turbidity, kondisi.c_str());
 
-  // 3. Initialize Network Connection
-  if (!initWiFi()) {
-    Serial.println("[WiFi] ✗ Gagal terhubung — skip transmisi.");
-    enterDeepSleep();
-    return;
-  }
-  // if (!initSIM800L()) {
-  //   Serial.println("[SIM800L] ✗ Modem tidak merespons — skip transmisi.");
-  //   enterDeepSleep();
-  //   return;
-  // }
-  // if (!openGPRS()) {
-  //   Serial.println("[GPRS] ✗ Gagal membuka koneksi GPRS — skip transmisi.");
-  //   enterDeepSleep();
-  //   return;
-  // }
-
-  // 4. Send Live Telemetry (only if values changed beyond threshold)
-  bool shouldSendLive = false;
-  if (abs(phValue - lastSentPH) > 0.05 ||
-      abs(tempC - lastSentTemp) > 0.1  ||
-      abs(turbidity - lastSentTurb) > 5.0f) {
-    shouldSendLive = true;
-  }
-
-  if (shouldSendLive) {
-    String liveJson = "{\"pH\":" + String(phValue, 2) +
-                      ",\"temp\":" + String(tempC, 1) +
-                      ",\"turb\":" + String(turbidity, 1) + "}";
-
-    if (sendFirebasePUT("/smart_buoy/live", liveJson)) {
-      Serial.println("[Firebase Live] ✓ Data terkirim.");
-      lastSentPH   = phValue;
-      lastSentTemp = tempC;
-      lastSentTurb = turbidity;
-    } else {
-      Serial.println("[Firebase Live] ✗ Gagal mengirim data.");
-    }
+  // 4. Connect WiFi (non-blocking — kalau gagal, pompa tetap jalan)
+  if (initWiFi()) {
+    String tsStr = getTimestampString();
+    sendLiveTelemetry(tsStr);
+    sendPumpStatus(tsStr);
+    if (bootCount % HISTORY_EVERY_N_BOOTS == 0) sendHistoryTelemetry(tsStr);
   } else {
-    Serial.println("[Firebase Live] — Tidak ada perubahan signifikan, skip.");
+    Serial.println("[WiFi] ✗ Skip telemetry awal, pompa tetap jalan otomatis.");
   }
 
-  // 5. Send Historical Data (every HISTORY_EVERY_N_BOOTS boots = ~10 minutes)
-  if (bootCount % HISTORY_EVERY_N_BOOTS == 0) {
-    unsigned long timestamp = getNetworkTimestamp();
+  // loop() akan handle siklus & telemetry selanjutnya secara berkelanjutan
+}
 
-    String historyJson = "{\"pH\":" + String(phValue, 2) +
-                         ",\"temp\":" + String(tempC, 1) +
-                         ",\"turb\":" + String(turbidity, 1) +
-                         ",\"ts\":" + String(timestamp) + "}";
+// =============================================================================
+// LOOP — Siklus pompa otomatis (always-on)
+// =============================================================================
+/**
+ * @brief State machine pompa otomatis berbasis millis() timing.
+ *
+ * Siklus berjalan terus-menerus tanpa intervensi user:
+ *   FILLING (60s) → WAITING (15s/15m) → DRAINING (40s) → FILLING → ...
+ *
+ * Setiap iterasi:
+ *   1. Cek transisi fase berdasarkan elapsed time
+ *   2. Periodic baca sensor & kirim Firebase (kalau WiFi connected)
+ *   3. Cek & reconnect WiFi kalau lost
+ *
+ * Mobile app hanya read /smart_buoy/live & /pump_status — tidak ada command.
+ */
+void loop() {
+  static unsigned long stateStartedAt   = millis();
+  static unsigned long lastTelemetryAt  = millis();
+  static unsigned long lastWifiCheckAt  = millis();
 
-    if (sendFirebasePOST("/smart_buoy/history", historyJson)) {
-      Serial.printf("[Firebase History] ✓ Data tersimpan (ts: %lu)\n", timestamp);
-    } else {
-      Serial.println("[Firebase History] ✗ Gagal mengirim data.");
+  unsigned long now     = millis();
+  unsigned long elapsed = now - stateStartedAt;
+
+  // ── 1. Cek transisi fase pompa ─────────────────────────────────────────────
+  unsigned long duration = getPumpStateDuration(pumpState);
+  if (elapsed >= duration) {
+    int prevState = pumpState;
+    pumpState = nextPumpState(pumpState);
+    stateStartedAt = now;
+    applyPumpRelay(pumpState);
+    Serial.printf("[Pump] %s → %s (setelah %lu ms)\n",
+                  pumpStateLabel(prevState), pumpStateLabel(pumpState), elapsed);
+
+    // Kirim status pompa langsung saat transisi (app update real-time)
+    if (WiFi.status() == WL_CONNECTED) {
+      String tsStr = getTimestampString();
+      sendPumpStatus(tsStr);
     }
   }
 
-  // 6. Cleanup & Sleep
-  // closeGPRS();
-  WiFi.disconnect(true);
+  // ── 2. Periodic telemetry (sensor + Firebase) ───────────────────────────────
+  if (now - lastTelemetryAt >= PUMP_TELEMETRY_INTERVAL_MS) {
+    lastTelemetryAt = now;
 
-  enterDeepSleep();
+    tempC     = readTemperature();
+    phValue   = readPH(tempC);
+    turbidity = readTurbidityNTU();
+    kondisi   = getTurbidityStatus(turbidity);
+    Serial.printf("[Sensor] Suhu=%.1f°C | pH=%.2f | Turb=%.1f NTU (%s) | %s\n",
+                  tempC, phValue, turbidity, kondisi.c_str(), currentPumpLabel());
+
+    if (WiFi.status() == WL_CONNECTED) {
+      String tsStr = getTimestampString();
+      sendLiveTelemetry(tsStr);
+      bootCount++;
+      if (bootCount % HISTORY_EVERY_N_BOOTS == 0) sendHistoryTelemetry(tsStr);
+    } else {
+      Serial.println("[Firebase] ⚠ WiFi offline — skip kirim data, pompa tetap jalan");
+    }
+  }
+
+  // ── 3. Periodic cek WiFi & reconnect kalau lost ────────────────────────────
+  if (now - lastWifiCheckAt >= WIFI_RECHECK_INTERVAL_MS) {
+    lastWifiCheckAt = now;
+    if (WiFi.status() != WL_CONNECTED) {
+      Serial.println("[WiFi] ⚠ Koneksi terputus — mencoba reconnect...");
+      initWiFi();  // non-blocking attempt
+    }
+  }
+
+  delay(50);  // Cegah tight loop, hemat CPU
 }
 
 // =============================================================================
-// LOOP — Not used in deep sleep model (setup handles everything)
-// =============================================================================
-void loop() {
-  // Execution never reaches here — ESP32 enters deep sleep at end of setup()
-}
-
-// =============================================================================
-// DEEP SLEEP
+// PUMP CONTROL — State machine 3 fase otomatis (FILLING → WAITING → DRAINING)
 // =============================================================================
 
 /**
- * @brief Configures and enters ESP32 deep sleep for SLEEP_DURATION_US microseconds.
- * On wake, execution restarts from setup().
+ * @brief Apply state pompa ke pin GPIO relay.
+ *
+ * INTERLOCK SAFETY: pompa 1 dan 2 tidak pernah ON bersamaan.
+ *   FILLING  → pompa ISI ON, BUANG OFF
+ *   DRAINING → pompa ISI OFF, BUANG ON
+ *   WAITING/IDLE → kedua pompa OFF
  */
-void enterDeepSleep() {
-  Serial.printf("[Sleep] Tidur selama %d detik...\n", (int)(SLEEP_DURATION_US / 1000000ULL));
-  Serial.println("══════════════════════════════════════════\n");
-  Serial.flush();
+void applyPumpRelay(int state) {
+  switch (state) {
+    case PUMP_FILLING:
+      digitalWrite(PUMP_DRAIN_PIN, RELAY_OFF);  // matikan dulu BUANG (interlock)
+      digitalWrite(PUMP_FILL_PIN,  RELAY_ON);
+      break;
+    case PUMP_DRAINING:
+      digitalWrite(PUMP_FILL_PIN,  RELAY_OFF);  // matikan dulu ISI (interlock)
+      digitalWrite(PUMP_DRAIN_PIN, RELAY_ON);
+      break;
+    case PUMP_WAITING:
+    case PUMP_IDLE:
+    default:
+      digitalWrite(PUMP_FILL_PIN,  RELAY_OFF);
+      digitalWrite(PUMP_DRAIN_PIN, RELAY_OFF);
+      break;
+  }
+}
 
-  esp_sleep_enable_timer_wakeup(SLEEP_DURATION_US);
-  esp_deep_sleep_start();
-  // Execution stops here — next wake starts from setup()
+/**
+ * @brief Durasi (ms) dari setiap fase pompa.
+ */
+unsigned long getPumpStateDuration(int state) {
+  switch (state) {
+    case PUMP_FILLING:  return PUMP_FILL_DURATION_MS;
+    case PUMP_WAITING:  return PUMP_WAIT_DURATION_MS;
+    case PUMP_DRAINING: return PUMP_DRAIN_DURATION_MS;
+    default:            return 0;
+  }
+}
+
+/**
+ * @brief Urutan transisi fase: FILLING → WAITING → DRAINING → FILLING (loop).
+ */
+int nextPumpState(int state) {
+  switch (state) {
+    case PUMP_FILLING:  return PUMP_WAITING;
+    case PUMP_WAITING:  return PUMP_DRAINING;
+    case PUMP_DRAINING: return PUMP_FILLING;
+    default:            return PUMP_FILLING;  // safety: balik ke siklus normal
+  }
+}
+
+const char* currentPumpLabel() {
+  return pumpStateLabel(pumpState);
+}
+
+const char* pumpStateLabel(int state) {
+  switch (state) {
+    case PUMP_FILLING:  return "FILLING";
+    case PUMP_WAITING:  return "WAITING";
+    case PUMP_DRAINING: return "DRAINING";
+    case PUMP_IDLE:
+    default:            return "IDLE";
+  }
+}
+
+/**
+ * @brief Helper: format current NTP timestamp jadi String milliseconds.
+ */
+String getTimestampString() {
+  uint64_t timestamp = getNetworkTimestamp();
+  char tsBuf[24];
+  snprintf(tsBuf, sizeof(tsBuf), "%llu", timestamp);
+  return String(tsBuf);
+}
+
+/**
+ * @brief Kirim payload live telemetry ke /smart_buoy/live (PUT, overwrite).
+ */
+bool sendLiveTelemetry(const String &tsStr) {
+  String json = "{\"pH\":" + String(phValue, 2) +
+                ",\"temp\":" + String(tempC, 1) +
+                ",\"turb\":" + String(turbidity, 1) +
+                ",\"pump\":\"" + String(currentPumpLabel()) + "\"" +
+                ",\"ts\":" + tsStr + "}";
+  bool ok = sendFirebasePUT("/smart_buoy/live", json);
+  if (ok) {
+    Serial.println("[Firebase Live] ✓ Terkirim");
+    lastSentPH = phValue; lastSentTemp = tempC; lastSentTurb = turbidity;
+  } else {
+    Serial.println("[Firebase Live] ✗ Gagal");
+  }
+  return ok;
+}
+
+/**
+ * @brief Kirim payload history telemetry ke /smart_buoy/history (POST, append).
+ */
+bool sendHistoryTelemetry(const String &tsStr) {
+  String json = "{\"pH\":" + String(phValue, 2) +
+                ",\"temp\":" + String(tempC, 1) +
+                ",\"turb\":" + String(turbidity, 1) +
+                ",\"pump\":\"" + String(currentPumpLabel()) + "\"" +
+                ",\"ts\":" + tsStr + "}";
+  bool ok = sendFirebasePOST("/smart_buoy/history", json);
+  if (ok) Serial.println("[Firebase History] ✓ Tersimpan");
+  else    Serial.println("[Firebase History] ✗ Gagal");
+  return ok;
+}
+
+/**
+ * @brief Kirim status pompa ke Firebase untuk ditampilkan di mobile app.
+ * Path: /smart_buoy/pump_status — overwrite (PUT) tiap transisi atau telemetry cycle.
+ */
+bool sendPumpStatus(const String &tsStr) {
+  unsigned long durationMs = getPumpStateDuration(pumpState);
+  String json = "{\"state\":\"" + String(currentPumpLabel()) + "\"" +
+                ",\"phaseDurationMs\":" + String(durationMs) +
+                ",\"debugMode\":" + String(PUMP_DEBUG_MODE) +
+                ",\"ts\":" + tsStr + "}";
+  return sendFirebasePUT("/smart_buoy/pump_status", json);
 }
 
 // =============================================================================
@@ -439,38 +577,58 @@ bool sendFirebaseHTTP(const String &path, const String &json, int method) {
     return false;
   }
 
-  WiFiClientSecure client;
-  client.setInsecure(); // Do not verify SSL cert (Firebase certs are complex)
+  // Retry up to 2 times if HTTPS handshake fails (common on slow networks)
+  for (int attempt = 1; attempt <= 2; attempt++) {
+    WiFiClientSecure client;
+    client.setInsecure();           // Skip SSL cert verification
+    client.setTimeout(15000);       // 15 seconds for socket operations
+    client.setHandshakeTimeout(15); // 15 seconds for TLS handshake
 
-  HTTPClient http;
-  
-  String url = "https://";
-  url += FIREBASE_HOST;
-  url += path;
-  url += ".json?auth=";
-  url += FIREBASE_AUTH;
+    HTTPClient http;
+    http.setConnectTimeout(15000);  // 15 seconds to connect
+    http.setTimeout(15000);          // 15 seconds for the whole request
 
-  http.begin(client, url);
-  http.addHeader("Content-Type", "application/json");
+    String url = "https://";
+    url += FIREBASE_HOST;
+    url += path;
+    url += ".json?auth=";
+    url += FIREBASE_AUTH;
 
-  int httpResponseCode = 0;
-  if (method == 1) {
-    httpResponseCode = http.PUT(json);
-  } else if (method == 2) {
-    httpResponseCode = http.POST(json);
+    if (!http.begin(client, url)) {
+      Serial.printf("[HTTP] ✗ Attempt %d: begin() gagal\n", attempt);
+      http.end();
+      delay(1000);
+      continue;
+    }
+    http.addHeader("Content-Type", "application/json");
+
+    int httpResponseCode = 0;
+    if (method == 1) {
+      httpResponseCode = http.PUT(json);
+    } else if (method == 2) {
+      httpResponseCode = http.POST(json);
+    }
+
+    if (httpResponseCode == 200 || httpResponseCode == 201) {
+      http.end();
+      return true;
+    }
+
+    Serial.printf("[HTTP] ✗ Attempt %d gagal, kode: %d\n", attempt, httpResponseCode);
+    if (httpResponseCode > 0) {
+      // Got a response but not success — print server message
+      String payload = http.getString();
+      Serial.printf("[HTTP] Respons: %s\n", payload.c_str());
+    }
+    http.end();
+
+    if (attempt < 2) {
+      Serial.println("[HTTP] ↻ Retry dalam 2 detik...");
+      delay(2000);
+    }
   }
 
-  bool success = false;
-  if (httpResponseCode == 200 || httpResponseCode == 201) {
-    success = true;
-  } else {
-    Serial.printf("[HTTP] ✗ Gagal, kode error: %d\n", httpResponseCode);
-    String payload = http.getString();
-    Serial.printf("[HTTP] Respons: %s\n", payload.c_str());
-  }
-
-  http.end();
-  return success;
+  return false;
 }
 
 // /**
@@ -593,20 +751,30 @@ bool sendFirebaseHTTP(const String &path, const String &json, int method) {
 // =============================================================================
 
 /**
- * @brief Retrieves Unix timestamp from NTP.
+ * @brief Retrieves Unix timestamp from NTP in MILLISECONDS.
  * Falls back to boot count estimation if network time unavailable.
- * @return Unix epoch timestamp (unsigned long)
+ * @return Unix epoch timestamp in milliseconds (uint64_t), matches Flutter expectation.
  */
-unsigned long getNetworkTimestamp() {
-  struct tm timeinfo;
-  if (!getLocalTime(&timeinfo, 5000)) { // wait up to 5 seconds
-    Serial.println("[Time] ⚠ Gagal mendapatkan waktu jaringan — gunakan estimasi.");
-    return (unsigned long)(bootCount * (SLEEP_DURATION_US / 1000000ULL));
-  }
-  
+uint64_t getNetworkTimestamp() {
+  // Use time(NULL) directly — safer than getLocalTime() which can trigger
+  // LWIP thread safety assertion in newer ESP32 cores.
+  // configTime() was called in initWiFi(); time() returns whatever NTP synced so far.
+  // Give NTP a small grace period to sync after WiFi connect.
+  delay(500);
+
   time_t now;
   time(&now);
-  return (unsigned long)now;
+
+  // Sanity check: if NTP synced, time will be post-2020 epoch (>1577836800)
+  if (now > 1577836800) {
+    // Return milliseconds (Unix epoch × 1000) for Flutter compatibility
+    // Use 64-bit to avoid overflow (epoch_ms exceeds 2^32 since 1970)
+    return (uint64_t)now * 1000ULL;
+  }
+
+  // Fallback: NTP not synced yet, estimate using boot count × sleep interval
+  Serial.println("[Time] ⚠ NTP belum sync — gunakan estimasi.");
+  return (uint64_t)bootCount * (SLEEP_DURATION_US / 1000ULL);
 }
 
 // // =============================================================================

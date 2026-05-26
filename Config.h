@@ -25,10 +25,52 @@
 
 // Analog Sensors
 #define PH_PIN   34   ///< GPIO Pin for Analog pH Sensor (ADC1)
-#define TURB_PIN 35   ///< GPIO Pin for Analog Turbidity Sensor (ADC1)
+#define TURB_PIN 35   ///<  GPIO Pin for Analog Turbidity Sensor (ADC1)
 
 // Digital Sensors
 #define TEMP_PIN 4    ///< GPIO Pin for DS18B20 OneWire Data
+
+// Pump Relay (Dual Channel) — RTC GPIO supaya state ke-hold saat deep sleep
+#define PUMP_FILL_PIN   25   ///< GPIO → IN1 relay → Pompa ISI air
+#define PUMP_DRAIN_PIN  26   ///< GPIO → IN2 relay → Pompa BUANG air
+#define RELAY_ON   LOW       ///< Modul relay China umumnya active LOW (kasih LOW = relay ON)
+#define RELAY_OFF  HIGH
+
+/* ==========================================
+ * PUMP CYCLE CONFIGURATION
+ * ==========================================
+ * Siklus OTOMATIS 3 fase berulang (mulai langsung saat ESP32 nyala):
+ *   FILLING  → pompa ISI ON      (1 menit) — ambil air tambak → wadah
+ *   WAITING  → kedua pompa OFF   (15 detik debug / 15 menit production) — sensor baca
+ *   DRAINING → pompa BUANG ON    (40 detik) — buang air wadah → tambak
+ *   → loop balik ke FILLING (otomatis tanpa intervensi)
+ *
+ * Aman: pompa 1 dan 2 tidak pernah ON bersamaan (interlock di state machine).
+ * Mobile app hanya untuk monitoring & prediksi — tidak ada command/button.
+ */
+
+// Toggle mode: 1 = debug (timing pendek untuk testing), 0 = production (15 menit waiting)
+#define PUMP_DEBUG_MODE  1
+
+#if PUMP_DEBUG_MODE
+  #define PUMP_FILL_DURATION_MS   60000UL    ///< 1 menit
+  #define PUMP_WAIT_DURATION_MS   15000UL    ///< 15 detik (debug)
+  #define PUMP_DRAIN_DURATION_MS  40000UL    ///< 40 detik
+#else
+  #define PUMP_FILL_DURATION_MS   60000UL    ///< 1 menit
+  #define PUMP_WAIT_DURATION_MS  900000UL    ///< 15 menit (production)
+  #define PUMP_DRAIN_DURATION_MS  40000UL    ///< 40 detik
+#endif
+
+// Interval kirim sensor data ke Firebase (ESP32 always-on, tidak deep sleep)
+#define PUMP_TELEMETRY_INTERVAL_MS  30000UL  ///< Kirim sensor data tiap 30 detik
+#define WIFI_RECHECK_INTERVAL_MS    60000UL  ///< Cek WiFi reconnect tiap 60 detik
+
+// Pump state constants (3 fase + IDLE untuk safety fallback)
+#define PUMP_IDLE      0
+#define PUMP_FILLING   1
+#define PUMP_WAITING   2
+#define PUMP_DRAINING  3
 
 // SIM800L UART Pins
 // #define SIM_RX   16   ///< GPIO Pin for SIM800L TX → ESP32 RX (UART2)
@@ -58,7 +100,7 @@
  * DEEP SLEEP CONFIGURATION
  * ==========================================
  */
-#define SLEEP_DURATION_US      30000000ULL  ///< DEBUG MODE: 30 detik. Ubah ke 60000000ULL saat produksi.
+#define SLEEP_DURATION_US      60000000ULL  ///< 60 detik (produksi).
 #define HISTORY_EVERY_N_BOOTS  10            ///< Push history every 10 boots (10 × 1 min = 10 min)
 
 /* ==========================================
