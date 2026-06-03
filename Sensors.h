@@ -63,17 +63,4 @@ float readPH(float tempC);
  */
 float readTemperature();
 
-/**
- * @brief Reads the calibrated NTU value from the turbidity sensor.
- * @return Calibrated turbidity value in NTU (float).
- */
-float readTurbidityNTU();
-
-/**
- * @brief Computes a qualitative state based on the calibrated turbidity value.
- * @param ntuValue The NTU value from the turbidity sensor.
- * @return String representing the qualitative state ("Jernih", "Keruh", "Kotor").
- */
-String getTurbidityStatus(float ntuValue);
-
 #endif // SENSORS_H

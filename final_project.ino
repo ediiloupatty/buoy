@@ -12,9 +12,12 @@
  * Execution Model — AUTO-CYCLE, ALWAYS-ON:
  *   - Power-on → setup() init hardware, langsung mulai siklus FILLING
  *   - loop() jalan terus dengan state machine 3 fase:
- *       FILLING (60s) → WAITING (15s/15m) → DRAINING (40s) → FILLING → ...
+ *       FILLING (30s) → WAITING (10m) → DRAINING (30s) → FILLING → ...
  *   - Pompa 1 (ISI) & Pompa 2 (BUANG) interlocked — tidak pernah ON bersamaan
- *   - Sensor dibaca + dikirim ke Firebase tiap 30 detik (kalau WiFi connected)
+ *   - Saat WAITING: sensor di-sampling berkala, nilai "air tenang" di-cache;
+ *     /live diperbarui tiap sampling
+ *   - /history CLOCK-ALIGNED: dikirim TEPAT di batas jam kelipatan 10 menit
+ *     (:00, :10, :20 ...) memakai cache air-tenang, lepas dari siklus pompa
  *   - WiFi auto-reconnect kalau terputus
  *   - Mobile app HANYA untuk monitoring (read /live, /pump_status) — tidak ada command
  *
@@ -46,7 +49,6 @@ const int   daylightOffset_sec = 0;
 RTC_DATA_ATTR int   bootCount = 0;          ///< Tracks number of wake cycles
 RTC_DATA_ATTR float lastSentPH   = -100.0;  ///< Last pH value sent to Firebase
 RTC_DATA_ATTR float lastSentTemp = -100.0;  ///< Last temperature sent to Firebase
-RTC_DATA_ATTR float lastSentTurb = -100.0;  ///< Last turbidity sent to Firebase
 
 // Pump state machine — auto-cycle FILLING → WAITING → DRAINING → loop
 // ESP32 always-on, mulai otomatis dari FILLING saat power on.
@@ -56,8 +58,17 @@ RTC_DATA_ATTR int pumpState = PUMP_IDLE;  // di-set ke FILLING di setup()
 // Global Telemetry State (current reading)
 float  phValue   = 0;
 float  tempC     = 0;
-float  turbidity = 0;
-String kondisi   = "";
+
+// ── Cache "air tenang" untuk history clock-aligned ───────────────────────────
+// Diisi saat fase WAITING (air sudah mengendap). Saat batas jam 10-menit tiba,
+// nilai inilah yang dikirim ke /history — apa pun fase pompa saat itu.
+float  lastGoodPH     = -100.0;  ///< pH air-tenang terakhir (cache)
+float  lastGoodTemp   = -100.0;  ///< Suhu air-tenang terakhir (cache)
+bool   hasGoodReading = false;   ///< true setelah minimal 1x sampling WAITING
+
+// Slot 10-menit terakhir yang sudah dikirim ke history (= epoch / HISTORY_INTERVAL_SEC).
+// Survives deep sleep agar tidak dobel kirim pada slot yang sama setelah reset.
+RTC_DATA_ATTR long lastHistorySlot = -1;
 
 // ── Forward Declarations ─────────────────────────────────────────────────────
 void applyPumpRelay(int state);
@@ -67,7 +78,9 @@ const char* currentPumpLabel();
 const char* pumpStateLabel(int state);
 bool   sendPumpStatus(const String &tsStr);
 bool   sendLiveTelemetry(const String &tsStr);
-bool   sendHistoryTelemetry(const String &tsStr);
+bool   sendHistoryReading(float ph, float temp, const String &tsStr);
+void   serviceHistoryScheduler();
+time_t getEpochSeconds();
 String getTimestampString();
 
 // bool   initSIM800L();
@@ -110,17 +123,13 @@ void setup() {
   // 3. Baca sensor pertama
   tempC     = readTemperature();
   phValue   = readPH(tempC);
-  turbidity = readTurbidityNTU();
-  kondisi   = getTurbidityStatus(turbidity);
-  Serial.printf("[Sensor] Suhu=%.1f°C | pH=%.2f | Turb=%.1f NTU (%s)\n",
-                tempC, phValue, turbidity, kondisi.c_str());
+  Serial.printf("[Sensor] Suhu=%.1f°C | pH=%.2f\n", tempC, phValue);
 
   // 4. Connect WiFi (non-blocking — kalau gagal, pompa tetap jalan)
   if (initWiFi()) {
+    // Hanya kirim status pompa awal — data sensor (live/history) menyusul saat fase WAITING
     String tsStr = getTimestampString();
-    sendLiveTelemetry(tsStr);
     sendPumpStatus(tsStr);
-    if (bootCount % HISTORY_EVERY_N_BOOTS == 0) sendHistoryTelemetry(tsStr);
   } else {
     Serial.println("[WiFi] ✗ Skip telemetry awal, pompa tetap jalan otomatis.");
   }
@@ -134,25 +143,26 @@ void setup() {
 /**
  * @brief State machine pompa otomatis berbasis millis() timing.
  *
- * Siklus berjalan terus-menerus tanpa intervensi user:
- *   FILLING (60s) → WAITING (15s/15m) → DRAINING (40s) → FILLING → ...
+ * Siklus berjalan terus-menerus tanpa intervensi user (durasi bebas):
+ *   FILLING → WAITING → DRAINING → FILLING → ...
  *
  * Setiap iterasi:
- *   1. Cek transisi fase berdasarkan elapsed time
- *   2. Periodic baca sensor & kirim Firebase (kalau WiFi connected)
- *   3. Cek & reconnect WiFi kalau lost
+ *   1. Cek transisi fase berdasarkan elapsed time (millis)
+ *   2. Saat WAITING: sampling sensor berkala → cache "air tenang" + update /live
+ *   3. Scheduler history clock-aligned (kirim di batas jam 10-menit via NTP)
+ *   4. Cek & reconnect WiFi kalau lost
  *
  * Mobile app hanya read /smart_buoy/live & /pump_status — tidak ada command.
  */
 void loop() {
-  static unsigned long stateStartedAt   = millis();
-  static unsigned long lastTelemetryAt  = millis();
-  static unsigned long lastWifiCheckAt  = millis();
+  static unsigned long stateStartedAt  = millis();
+  static unsigned long lastWifiCheckAt = millis();
+  static unsigned long lastSampleAt    = 0;  // timer sampling sensor saat WAITING
 
   unsigned long now     = millis();
   unsigned long elapsed = now - stateStartedAt;
 
-  // ── 1. Cek transisi fase pompa ─────────────────────────────────────────────
+  // ── 1. Transisi fase pompa (siklus BEBAS, tidak terkait jadwal history) ──────
   unsigned long duration = getPumpStateDuration(pumpState);
   if (elapsed >= duration) {
     int prevState = pumpState;
@@ -162,35 +172,40 @@ void loop() {
     Serial.printf("[Pump] %s → %s (setelah %lu ms)\n",
                   pumpStateLabel(prevState), pumpStateLabel(pumpState), elapsed);
 
+    // Masuk WAITING → paksa sampling pertama (setelah endap) dimulai ulang
+    if (pumpState == PUMP_WAITING) {
+      lastSampleAt = 0;
+    }
+
     // Kirim status pompa langsung saat transisi (app update real-time)
     if (WiFi.status() == WL_CONNECTED) {
-      String tsStr = getTimestampString();
-      sendPumpStatus(tsStr);
+      sendPumpStatus(getTimestampString());
     }
   }
 
-  // ── 2. Periodic telemetry (sensor + Firebase) ───────────────────────────────
-  if (now - lastTelemetryAt >= PUMP_TELEMETRY_INTERVAL_MS) {
-    lastTelemetryAt = now;
-
-    tempC     = readTemperature();
-    phValue   = readPH(tempC);
-    turbidity = readTurbidityNTU();
-    kondisi   = getTurbidityStatus(turbidity);
-    Serial.printf("[Sensor] Suhu=%.1f°C | pH=%.2f | Turb=%.1f NTU (%s) | %s\n",
-                  tempC, phValue, turbidity, kondisi.c_str(), currentPumpLabel());
-
-    if (WiFi.status() == WL_CONNECTED) {
-      String tsStr = getTimestampString();
-      sendLiveTelemetry(tsStr);
-      bootCount++;
-      if (bootCount % HISTORY_EVERY_N_BOOTS == 0) sendHistoryTelemetry(tsStr);
-    } else {
-      Serial.println("[Firebase] ⚠ WiFi offline — skip kirim data, pompa tetap jalan");
+  // ── 2. WAITING: endapkan → sampling berkala → cache "air tenang" + /live ─────
+  //   Pembacaan di-cache ke lastGood{PH,Temp}; inilah yang nanti dikirim ke
+  //   history pada batas jam 10-menit. /live diperbarui tiap sampling.
+  if (pumpState == PUMP_WAITING && elapsed >= WAIT_SETTLE_MS) {
+    if (lastSampleAt == 0 || (now - lastSampleAt >= WAIT_SAMPLE_INTERVAL_MS)) {
+      lastSampleAt = now;
+      tempC   = readTemperature();
+      phValue = readPH(tempC);
+      lastGoodTemp   = tempC;
+      lastGoodPH     = phValue;
+      hasGoodReading = true;
+      Serial.printf("[Sensor] WAITING sample → Suhu=%.1f°C | pH=%.2f (cached)\n",
+                    tempC, phValue);
+      if (WiFi.status() == WL_CONNECTED) {
+        sendLiveTelemetry(getTimestampString());
+      }
     }
   }
 
-  // ── 3. Periodic cek WiFi & reconnect kalau lost ────────────────────────────
+  // ── 3. Scheduler history CLOCK-ALIGNED (epoch % HISTORY_INTERVAL_SEC) ────────
+  serviceHistoryScheduler();
+
+  // ── 4. Periodic cek WiFi & reconnect kalau lost ─────────────────────────────
   if (now - lastWifiCheckAt >= WIFI_RECHECK_INTERVAL_MS) {
     lastWifiCheckAt = now;
     if (WiFi.status() != WL_CONNECTED) {
@@ -200,6 +215,52 @@ void loop() {
   }
 
   delay(50);  // Cegah tight loop, hemat CPU
+}
+
+/**
+ * @brief Kirim /history TEPAT pada batas jam kelipatan HISTORY_INTERVAL_SEC.
+ *
+ * Lepas dari siklus pompa. Memakai pembacaan "air tenang" terakhir (cache dari
+ * fase WAITING). Timestamp DIBULATKAN ke batas slot — mis. menit :00, :10, :20 —
+ * sehingga data history selalu rapi di kelipatan 10 menit & interval konstan
+ * (penting untuk validitas DES di aplikasi).
+ *
+ * Terikat NTP → otomatis tidak drift. Bila NTP belum sync, slot dilewati.
+ */
+void serviceHistoryScheduler() {
+  // Mode debug: JANGAN kirim /history (cukup /live). History hanya saat produksi.
+  if (PUMP_DEBUG_MODE) return;
+
+  if (WiFi.status() != WL_CONNECTED) return;
+
+  time_t epoch = getEpochSeconds();
+  if ((uint64_t)epoch < NTP_VALID_EPOCH) return;   // NTP belum sync → tunggu
+
+  long slot = (long)(epoch / HISTORY_INTERVAL_SEC);
+
+  // Boot pertama: jangan langsung kirim, cukup catat slot saat ini sebagai acuan.
+  if (lastHistorySlot < 0) {
+    lastHistorySlot = slot;
+    return;
+  }
+
+  if (slot == lastHistorySlot) return;   // masih dalam slot 10-menit yang sama
+  lastHistorySlot = slot;                // tandai slot ini sudah ditangani
+
+  if (!hasGoodReading) {
+    Serial.println("[History] ⚠ Batas 10-menit tiba tapi belum ada pembacaan "
+                   "air tenang — slot dilewati.");
+    return;
+  }
+
+  // Timestamp dibulatkan ke batas slot (ms) — selaras :00 / :10 / :20 ...
+  uint64_t tsAlignedMs = (uint64_t)slot * HISTORY_INTERVAL_SEC * 1000ULL;
+  char tsBuf[24];
+  snprintf(tsBuf, sizeof(tsBuf), "%llu", tsAlignedMs);
+
+  Serial.printf("[History] ▶ Batas 10-menit → kirim (ts=%s | Suhu=%.1f | pH=%.2f)\n",
+                tsBuf, lastGoodTemp, lastGoodPH);
+  sendHistoryReading(lastGoodPH, lastGoodTemp, String(tsBuf));
 }
 
 // =============================================================================
@@ -287,13 +348,12 @@ String getTimestampString() {
 bool sendLiveTelemetry(const String &tsStr) {
   String json = "{\"pH\":" + String(phValue, 2) +
                 ",\"temp\":" + String(tempC, 1) +
-                ",\"turb\":" + String(turbidity, 1) +
                 ",\"pump\":\"" + String(currentPumpLabel()) + "\"" +
                 ",\"ts\":" + tsStr + "}";
   bool ok = sendFirebasePUT("/smart_buoy/live", json);
   if (ok) {
     Serial.println("[Firebase Live] ✓ Terkirim");
-    lastSentPH = phValue; lastSentTemp = tempC; lastSentTurb = turbidity;
+    lastSentPH = phValue; lastSentTemp = tempC;
   } else {
     Serial.println("[Firebase Live] ✗ Gagal");
   }
@@ -301,13 +361,16 @@ bool sendLiveTelemetry(const String &tsStr) {
 }
 
 /**
- * @brief Kirim payload history telemetry ke /smart_buoy/history (POST, append).
+ * @brief Kirim payload history ke /smart_buoy/history (POST, append).
+ *
+ * Nilai pH/suhu diberikan eksplisit (pembacaan "air tenang" yang di-cache),
+ * bukan dari global current — agar history selalu mencerminkan kondisi WAITING
+ * walau pengiriman terjadi di fase pompa lain. Field "pump" dikunci "WAITING".
  */
-bool sendHistoryTelemetry(const String &tsStr) {
-  String json = "{\"pH\":" + String(phValue, 2) +
-                ",\"temp\":" + String(tempC, 1) +
-                ",\"turb\":" + String(turbidity, 1) +
-                ",\"pump\":\"" + String(currentPumpLabel()) + "\"" +
+bool sendHistoryReading(float ph, float temp, const String &tsStr) {
+  String json = "{\"pH\":" + String(ph, 2) +
+                ",\"temp\":" + String(temp, 1) +
+                ",\"pump\":\"WAITING\"" +
                 ",\"ts\":" + tsStr + "}";
   bool ok = sendFirebasePOST("/smart_buoy/history", json);
   if (ok) Serial.println("[Firebase History] ✓ Tersimpan");
@@ -755,6 +818,19 @@ bool sendFirebaseHTTP(const String &path, const String &json, int method) {
  * Falls back to boot count estimation if network time unavailable.
  * @return Unix epoch timestamp in milliseconds (uint64_t), matches Flutter expectation.
  */
+/**
+ * @brief Epoch NTP dalam DETIK, ringan & tanpa delay (dipanggil tiap loop).
+ *
+ * Dipakai scheduler history untuk mendeteksi batas slot 10-menit. Mengembalikan
+ * apa adanya dari time(); pemanggil membandingkan dengan NTP_VALID_EPOCH untuk
+ * memastikan NTP sudah sync.
+ */
+time_t getEpochSeconds() {
+  time_t now;
+  time(&now);
+  return now;
+}
+
 uint64_t getNetworkTimestamp() {
   // Use time(NULL) directly — safer than getLocalTime() which can trigger
   // LWIP thread safety assertion in newer ESP32 cores.

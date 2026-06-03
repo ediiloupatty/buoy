@@ -25,7 +25,6 @@
 
 // Analog Sensors
 #define PH_PIN   34   ///< GPIO Pin for Analog pH Sensor (ADC1)
-#define TURB_PIN 35   ///<  GPIO Pin for Analog Turbidity Sensor (ADC1)
 
 // Digital Sensors
 #define TEMP_PIN 4    ///< GPIO Pin for DS18B20 OneWire Data
@@ -40,9 +39,9 @@
  * PUMP CYCLE CONFIGURATION
  * ==========================================
  * Siklus OTOMATIS 3 fase berulang (mulai langsung saat ESP32 nyala):
- *   FILLING  → pompa ISI ON      (1 menit) — ambil air tambak → wadah
- *   WAITING  → kedua pompa OFF   (15 detik debug / 15 menit production) — sensor baca
- *   DRAINING → pompa BUANG ON    (40 detik) — buang air wadah → tambak
+ *   FILLING  → pompa ISI ON      (30 detik) — ambil air tambak → wadah
+ *   WAITING  → kedua pompa OFF   (10 menit production) — sensor baca
+ *   DRAINING → pompa BUANG ON    (30 detik) — buang air wadah → tambak
  *   → loop balik ke FILLING (otomatis tanpa intervensi)
  *
  * Aman: pompa 1 dan 2 tidak pernah ON bersamaan (interlock di state machine).
@@ -50,21 +49,38 @@
  */
 
 // Toggle mode: 1 = debug (timing pendek untuk testing), 0 = production (15 menit waiting)
-#define PUMP_DEBUG_MODE  1
-
+#define PUMP_DEBUG_MODE 0
 #if PUMP_DEBUG_MODE
-  #define PUMP_FILL_DURATION_MS   60000UL    ///< 1 menit
-  #define PUMP_WAIT_DURATION_MS   15000UL    ///< 15 detik (debug)
-  #define PUMP_DRAIN_DURATION_MS  40000UL    ///< 40 detik
+  #define PUMP_FILL_DURATION_MS   30000UL    ///< 30 detik (debug)
+  #define PUMP_WAIT_DURATION_MS   30000UL    ///< 30 detik (debug)
+  #define PUMP_DRAIN_DURATION_MS  30000UL    ///< 30 detik (debug)
 #else
-  #define PUMP_FILL_DURATION_MS   60000UL    ///< 1 menit
-  #define PUMP_WAIT_DURATION_MS  900000UL    ///< 15 menit (production)
-  #define PUMP_DRAIN_DURATION_MS  40000UL    ///< 40 detik
+  #define PUMP_FILL_DURATION_MS   30000UL    ///< 30 detik (production)
+  #define PUMP_WAIT_DURATION_MS  600000UL    ///< 10 menit (production)
+  #define PUMP_DRAIN_DURATION_MS  40000UL    ///< 40 detik (production)
 #endif
 
-// Interval kirim sensor data ke Firebase (ESP32 always-on, tidak deep sleep)
-#define PUMP_TELEMETRY_INTERVAL_MS  30000UL  ///< Kirim sensor data tiap 30 detik
-#define WIFI_RECHECK_INTERVAL_MS    60000UL  ///< Cek WiFi reconnect tiap 60 detik
+// ── Telemetry: history CLOCK-ALIGNED, lepas dari siklus pompa ────────────────
+// /history dikirim TEPAT pada batas jam kelipatan HISTORY_INTERVAL_SEC
+// (mis. 600 dtk → menit :00, :10, :20, :30 ...), berapa pun durasi siklus pompa.
+// Nilai yang dikirim = pembacaan "air tenang" terakhir yang di-cache saat WAITING.
+#define HISTORY_INTERVAL_SEC     600UL     ///< Interval clock-aligned history (detik) = 10 menit
+#define WIFI_RECHECK_INTERVAL_MS 60000UL   ///< Cek WiFi reconnect tiap 60 detik
+
+// Saat fase WAITING (air tenang): endapkan dulu, lalu sampling berkala.
+// Pembacaan terakhir di-cache sebagai "air tenang" untuk dikirim ke history
+// pada batas jam berikutnya, dan dipakai untuk update /live real-time.
+// Debug: dipercepat agar /live tetap terkirim dalam WAITING singkat (15 detik).
+#if PUMP_DEBUG_MODE
+  #define WAIT_SETTLE_MS           3000UL    ///< Debug: endap 3 detik
+  #define WAIT_SAMPLE_INTERVAL_MS  3000UL    ///< Debug: sampling tiap 3 detik
+#else
+  #define WAIT_SETTLE_MS           60000UL   ///< Endap 1 menit sebelum mulai sampling
+  #define WAIT_SAMPLE_INTERVAL_MS  30000UL   ///< Sampling tiap 30 detik saat WAITING
+#endif
+
+// Ambang epoch NTP dianggap valid (1 Jan 2020). Di bawah ini = NTP belum sync.
+#define NTP_VALID_EPOCH          1577836800ULL
 
 // Pump state constants (3 fase + IDLE untuk safety fallback)
 #define PUMP_IDLE      0
@@ -101,7 +117,6 @@
  * ==========================================
  */
 #define SLEEP_DURATION_US      60000000ULL  ///< 60 detik (produksi).
-#define HISTORY_EVERY_N_BOOTS  10            ///< Push history every 10 boots (10 × 1 min = 10 min)
 
 /* ==========================================
  * FIREBASE CONFIGURATION
