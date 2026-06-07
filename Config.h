@@ -12,7 +12,7 @@
  * @file Config.h
  * @brief Global configuration constants for the Smart Buoy IoT System.
  * 
- * This file contains all hardware pin definitions, SIM800L modem settings,
+ * This file contains all hardware pin definitions, WiFi settings,
  * deep sleep parameters, and Firebase endpoint configurations.
  */
 
@@ -25,6 +25,7 @@
 
 // Analog Sensors
 #define PH_PIN   34   ///< GPIO Pin for Analog pH Sensor (ADC1)
+#define TURB_PIN 35   ///< GPIO Pin for Analog Turbidity Sensor (ADC1, input-only)
 
 // Digital Sensors
 #define TEMP_PIN 4    ///< GPIO Pin for DS18B20 OneWire Data
@@ -88,23 +89,6 @@
 #define PUMP_WAITING   2
 #define PUMP_DRAINING  3
 
-// SIM800L UART Pins
-// #define SIM_RX   16   ///< GPIO Pin for SIM800L TX → ESP32 RX (UART2)
-// #define SIM_TX   17   ///< GPIO Pin for SIM800L RX ← ESP32 TX (UART2)
-// #define SIM_RST  5    ///< GPIO Pin for SIM800L RST (active LOW — pull LOW 200ms untuk reset)
-// #define SIM_BAUD 9600 ///< SIM800L default baud rate (9600 lebih stabil dari 115200)
-
-/* ==========================================
- * SIM800L / GPRS CONFIGURATION
- * ==========================================
- * Adjust APN according to your SIM card provider:
- *   Telkomsel : "internet"
- *   Indosat   : "indosatgprs"
- *   XL        : "internet"
- *   Tri (3)   : "3data"
- */
-// static const char *APN = "internet";
-
 /* ==========================================
  * WIFI CONFIGURATION
  * ==========================================
@@ -121,7 +105,7 @@
 /* ==========================================
  * FIREBASE CONFIGURATION
  * ==========================================
- * REST API endpoint for SIM800L HTTPS communication.
+ * REST API endpoint for WiFi HTTPS communication.
  * Format: https://<host>/<path>.json?auth=<database_secret>
  */
 #define FIREBASE_HOST "monitoring-air-tambak-udang-default-rtdb.asia-southeast1.firebasedatabase.app"
