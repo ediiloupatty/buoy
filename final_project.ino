@@ -31,11 +31,6 @@
 #include "Config.h"
 #include "Sensors.h"
 
-// ── Platform-specific includes ───────────────────────────────────────────────
-// #include <HardwareSerial.h>
-// // SIM800L Serial (UART2)
-// HardwareSerial sim800(2);
-
 #include <WiFi.h>
 #include <HTTPClient.h>
 #include <WiFiClientSecure.h>
@@ -49,6 +44,7 @@ const int   daylightOffset_sec = 0;
 RTC_DATA_ATTR int   bootCount = 0;          ///< Tracks number of wake cycles
 RTC_DATA_ATTR float lastSentPH   = -100.0;  ///< Last pH value sent to Firebase
 RTC_DATA_ATTR float lastSentTemp = -100.0;  ///< Last temperature sent to Firebase
+RTC_DATA_ATTR float lastSentTurb = -100.0;  ///< Last turbidity (NTU) sent to Firebase
 
 // Pump state machine — auto-cycle FILLING → WAITING → DRAINING → loop
 // ESP32 always-on, mulai otomatis dari FILLING saat power on.
@@ -58,12 +54,15 @@ RTC_DATA_ATTR int pumpState = PUMP_IDLE;  // di-set ke FILLING di setup()
 // Global Telemetry State (current reading)
 float  phValue   = 0;
 float  tempC     = 0;
+float  turbidity = 0;           ///< Kekeruhan terkini (NTU)
+String kondisi   = "Jernih";    ///< Label kualitatif kejernihan
 
 // ── Cache "air tenang" untuk history clock-aligned ───────────────────────────
 // Diisi saat fase WAITING (air sudah mengendap). Saat batas jam 10-menit tiba,
 // nilai inilah yang dikirim ke /history — apa pun fase pompa saat itu.
 float  lastGoodPH     = -100.0;  ///< pH air-tenang terakhir (cache)
 float  lastGoodTemp   = -100.0;  ///< Suhu air-tenang terakhir (cache)
+float  lastGoodTurb   = -100.0;  ///< Kekeruhan air-tenang terakhir (cache, NTU)
 bool   hasGoodReading = false;   ///< true setelah minimal 1x sampling WAITING
 
 // Slot 10-menit terakhir yang sudah dikirim ke history (= epoch / HISTORY_INTERVAL_SEC).
@@ -78,22 +77,16 @@ const char* currentPumpLabel();
 const char* pumpStateLabel(int state);
 bool   sendPumpStatus(const String &tsStr);
 bool   sendLiveTelemetry(const String &tsStr);
-bool   sendHistoryReading(float ph, float temp, const String &tsStr);
+bool   sendHistoryReading(float ph, float temp, float turb, const String &tsStr);
 void   serviceHistoryScheduler();
 time_t getEpochSeconds();
 String getTimestampString();
 
-// bool   initSIM800L();
-// void   resetSIM800L();
-// bool   openGPRS();
-// void   closeGPRS();
 bool   initWiFi();
 
 bool   sendFirebasePUT(const String &path, const String &json);
 bool   sendFirebasePOST(const String &path, const String &json);
 bool   sendFirebaseHTTP(const String &path, const String &json, int method);
-// String sendAT(const String &cmd, unsigned long timeoutMs = 2000);
-// bool   waitForResponse(const String &expected, unsigned long timeoutMs = 2000);
 uint64_t getNetworkTimestamp();
 
 // =============================================================================
@@ -123,7 +116,10 @@ void setup() {
   // 3. Baca sensor pertama
   tempC     = readTemperature();
   phValue   = readPH(tempC);
-  Serial.printf("[Sensor] Suhu=%.1f°C | pH=%.2f\n", tempC, phValue);
+  turbidity = readTurbidityNTU();
+  kondisi   = getTurbidityStatus(turbidity);
+  Serial.printf("[Sensor] Suhu=%.1f°C | pH=%.2f | Turb=%.1f NTU (%s)\n",
+                tempC, phValue, turbidity, kondisi.c_str());
 
   // 4. Connect WiFi (non-blocking — kalau gagal, pompa tetap jalan)
   if (initWiFi()) {
@@ -189,13 +185,16 @@ void loop() {
   if (pumpState == PUMP_WAITING && elapsed >= WAIT_SETTLE_MS) {
     if (lastSampleAt == 0 || (now - lastSampleAt >= WAIT_SAMPLE_INTERVAL_MS)) {
       lastSampleAt = now;
-      tempC   = readTemperature();
-      phValue = readPH(tempC);
+      tempC     = readTemperature();
+      phValue   = readPH(tempC);
+      turbidity = readTurbidityNTU();
+      kondisi   = getTurbidityStatus(turbidity);
       lastGoodTemp   = tempC;
       lastGoodPH     = phValue;
+      lastGoodTurb   = turbidity;
       hasGoodReading = true;
-      Serial.printf("[Sensor] WAITING sample → Suhu=%.1f°C | pH=%.2f (cached)\n",
-                    tempC, phValue);
+      Serial.printf("[Sensor] WAITING sample → Suhu=%.1f°C | pH=%.2f | Turb=%.1f NTU (%s) (cached)\n",
+                    tempC, phValue, turbidity, kondisi.c_str());
       if (WiFi.status() == WL_CONNECTED) {
         sendLiveTelemetry(getTimestampString());
       }
@@ -258,9 +257,9 @@ void serviceHistoryScheduler() {
   char tsBuf[24];
   snprintf(tsBuf, sizeof(tsBuf), "%llu", tsAlignedMs);
 
-  Serial.printf("[History] ▶ Batas 10-menit → kirim (ts=%s | Suhu=%.1f | pH=%.2f)\n",
-                tsBuf, lastGoodTemp, lastGoodPH);
-  sendHistoryReading(lastGoodPH, lastGoodTemp, String(tsBuf));
+  Serial.printf("[History] ▶ Batas 10-menit → kirim (ts=%s | Suhu=%.1f | pH=%.2f | Turb=%.1f)\n",
+                tsBuf, lastGoodTemp, lastGoodPH, lastGoodTurb);
+  sendHistoryReading(lastGoodPH, lastGoodTemp, lastGoodTurb, String(tsBuf));
 }
 
 // =============================================================================
@@ -348,12 +347,14 @@ String getTimestampString() {
 bool sendLiveTelemetry(const String &tsStr) {
   String json = "{\"pH\":" + String(phValue, 2) +
                 ",\"temp\":" + String(tempC, 1) +
+                ",\"turb\":" + String(turbidity, 1) +
+                ",\"kondisi\":\"" + kondisi + "\"" +
                 ",\"pump\":\"" + String(currentPumpLabel()) + "\"" +
                 ",\"ts\":" + tsStr + "}";
   bool ok = sendFirebasePUT("/smart_buoy/live", json);
   if (ok) {
     Serial.println("[Firebase Live] ✓ Terkirim");
-    lastSentPH = phValue; lastSentTemp = tempC;
+    lastSentPH = phValue; lastSentTemp = tempC; lastSentTurb = turbidity;
   } else {
     Serial.println("[Firebase Live] ✗ Gagal");
   }
@@ -367,9 +368,11 @@ bool sendLiveTelemetry(const String &tsStr) {
  * bukan dari global current — agar history selalu mencerminkan kondisi WAITING
  * walau pengiriman terjadi di fase pompa lain. Field "pump" dikunci "WAITING".
  */
-bool sendHistoryReading(float ph, float temp, const String &tsStr) {
+bool sendHistoryReading(float ph, float temp, float turb, const String &tsStr) {
   String json = "{\"pH\":" + String(ph, 2) +
                 ",\"temp\":" + String(temp, 1) +
+                ",\"turb\":" + String(turb, 1) +
+                ",\"kondisi\":\"" + getTurbidityStatus(turb) + "\"" +
                 ",\"pump\":\"WAITING\"" +
                 ",\"ts\":" + tsStr + "}";
   bool ok = sendFirebasePOST("/smart_buoy/history", json);
@@ -398,14 +401,6 @@ bool sendPumpStatus(const String &tsStr) {
 // ██║███╗██║██║██╔══╝  ██║    ██║╚██╔╝██║██║   ██║██║  ██║██╔══╝
 // ╚███╔███╔╝██║██║     ██║    ██║ ╚═╝ ██║╚██████╔╝██████╔╝███████╗
 //  ╚══╝╚══╝ ╚═╝╚═╝     ╚═╝    ╚═╝     ╚═╝ ╚═════╝ ╚═════╝ ╚══════╝
-// =============================================================================
-// =============================================================================
-// ███████╗██╗███╗   ███╗ █████╗  ██████╗  ██████╗ ██╗
-// ██╔════╝██║████╗ ████║██╔══██╗██╔═████╗██╔═████╗██║
-// ███████╗██║██╔████╔██║╚█████╔╝██║██╔██║██║██╔██║██║
-// ╚════██║██║██║╚██╔╝██║██╔══██╗████╔╝██║████╔╝██║██║
-// ███████║██║██║ ╚═╝ ██║╚█████╔╝╚██████╔╝╚██████╔╝███████╗
-// ╚══════╝╚═╝╚═╝     ╚═╝ ╚════╝  ╚═════╝  ╚═════╝ ╚══════╝
 // =============================================================================
 
 /**
@@ -438,177 +433,8 @@ bool initWiFi() {
   }
 }
 
-// /**
-//  * @brief Mereset SIM800L melalui pin RST (active LOW).
-//  * Pull RST ke LOW selama 200ms, lalu release HIGH.
-//  * Tunggu 3 detik agar modem selesai boot ulang.
-//  */
-// void resetSIM800L() {
-//   pinMode(SIM_RST, OUTPUT);
-//   digitalWrite(SIM_RST, HIGH);  // Pastikan HIGH dulu (idle state)
-//   delay(100);
-//   digitalWrite(SIM_RST, LOW);   // Trigger reset (active LOW)
-//   delay(200);                   // Minimum pulse 100-200ms
-//   digitalWrite(SIM_RST, HIGH);  // Release
-//   delay(3000);                  // Tunggu modem boot ulang
-//   Serial.println("[SIM800L] RST triggered — menunggu modem boot...");
-// }
-
-// /**
-//  * @brief Initializes the SIM800L modem and verifies communication.
-//  *
-//  * Flow:
-//  *  1. Start serial at default 9600 baud
-//  *  2. Try AT command — jika tidak respons, lakukan PWRKEY toggle (power on)
-//  *  3. Tunggu modem siap, nonaktifkan echo
-//  *  4. Validasi SIM card dan registrasi jaringan
-//  *
-//  * @return true if modem responds, SIM detected, and network registered.
-//  */
-// bool initSIM800L() {
-//   // ── Step 1: Start Serial ────────────────────────────────────────────────────
-//   sim800.begin(SIM_BAUD, SERIAL_8N1, SIM_RX, SIM_TX);
-//   delay(500);
-// 
-//   Serial.print("[SIM800L] Inisialisasi modem");
-// 
-//   // ── Step 2: Cek apakah modem sudah aktif (setelah wake dari deep sleep) ────
-//   bool modemReady = false;
-//   for (int i = 0; i < 3; i++) {
-//     Serial.print(".");
-//     String resp = sendAT("AT", 1500);
-//     if (resp.indexOf("OK") != -1) {
-//       modemReady = true;
-//       break;
-//     }
-//     delay(500);
-//   }
-// 
-//   // ── Step 3: Jika tidak respons, lakukan RST reset ──────────────────────────
-//   if (!modemReady) {
-//     Serial.println("\n[SIM800L] ⚠ Tidak ada respons — mencoba RST reset...");
-//     resetSIM800L();
-// 
-//     // Coba lagi setelah power cycle (max 5 detik)
-//     for (int i = 0; i < 5; i++) {
-//       Serial.print(".");
-//       String resp = sendAT("AT", 2000);
-//       if (resp.indexOf("OK") != -1) {
-//         modemReady = true;
-//         break;
-//       }
-//       delay(1000);
-//     }
-//   }
-// 
-//   if (!modemReady) {
-//     Serial.println("[SIM800L] ✗ Modem tidak merespons setelah RST reset.");
-//     Serial.println("[SIM800L] ✗ Periksa: kabel TX/RX, tegangan power (4.6-5.2V untuk V2), dan sambungan RST.");
-//     return false;
-//   }
-// 
-//   Serial.println("\n[SIM800L] ✓ Modem merespons.");
-// 
-//   // ── Step 4: Konfigurasi dasar modem ─────────────────────────────────────────
-//   sendAT("ATE0");          // Nonaktifkan echo
-//   sendAT("AT+CMEE=2");     // Enable verbose error reporting (untuk debug)
-// 
-//   // ── Step 5: Validasi SIM Card ────────────────────────────────────────────────
-//   String simResp = "";
-//   for (int i = 0; i < 5; i++) {
-//     simResp = sendAT("AT+CPIN?", 3000);
-//     if (simResp.indexOf("READY") != -1) break;
-//     delay(1000);
-//   }
-// 
-//   if (simResp.indexOf("READY") != -1) {
-//     Serial.println("[SIM800L] ✓ SIM Card terdeteksi.");
-//   } else if (simResp.indexOf("SIM PIN") != -1) {
-//     Serial.println("[SIM800L] ✗ SIM Card terkunci PIN — masukkan PIN dulu.");
-//     return false;
-//   } else if (simResp.indexOf("NO SIM") != -1 || simResp.indexOf("SIM not") != -1) {
-//     Serial.println("[SIM800L] ✗ SIM Card tidak terpasang.");
-//     return false;
-//   } else {
-//     Serial.printf("[SIM800L] ✗ Status SIM tidak dikenal: %s\n", simResp.c_str());
-//     return false;
-//   }
-// 
-//   // ── Step 6: Tunggu Registrasi Jaringan (max 45 detik) ───────────────────────
-//   Serial.print("[SIM800L] Menunggu registrasi jaringan");
-//   for (int j = 0; j < 45; j++) {
-//     String creg = sendAT("AT+CREG?", 2000);
-//     // +CREG: 0,1 = home network, +CREG: 0,5 = roaming
-//     if (creg.indexOf(",1") != -1 || creg.indexOf(",5") != -1) {
-//       Serial.println(" ✓ Terdaftar.");
-// 
-//       // Tampilkan info sinyal dan operator
-//       String csq = sendAT("AT+CSQ", 1000);
-//       String cops = sendAT("AT+COPS?", 2000);
-//       Serial.printf("[SIM800L] Sinyal: %s\n", csq.c_str());
-//       Serial.printf("[SIM800L] Operator: %s\n", cops.c_str());
-//       return true;
-//     }
-//     Serial.print(".");
-//     delay(1000);
-//   }
-// 
-//   Serial.println("\n[SIM800L] ✗ Timeout registrasi jaringan.");
-//   Serial.println("[SIM800L] ✗ Pastikan sinyal operator tersedia di lokasi ini.");
-//   return false;
-// }
-// 
-// /**
-//  * @brief Opens a GPRS data connection using the configured APN.
-//  * @return true if GPRS connection established successfully.
-//  */
-// bool openGPRS() {
-//   Serial.print("[GPRS] Membuka koneksi");
-// 
-//   // Close any existing bearer (ignore errors)
-//   sendAT("AT+SAPBR=0,1", 3000);
-//   delay(500);
-// 
-//   // Configure bearer
-//   sendAT("AT+SAPBR=3,1,\"Contype\",\"GPRS\"");
-//   sendAT("AT+SAPBR=3,1,\"APN\",\"" + String(APN) + "\"");
-// 
-//   // Open bearer
-//   String resp = sendAT("AT+SAPBR=1,1", 10000);
-//   if (resp.indexOf("OK") != -1 || resp.indexOf("ERROR") != -1) {
-//     // Check if bearer is actually open
-//     delay(500);
-//     String status = sendAT("AT+SAPBR=2,1", 3000);
-//     if (status.indexOf("1,1,") != -1) {
-//       Serial.println(" ✓ Terhubung.");
-//       return true;
-//     }
-//   }
-// 
-//   // Retry once
-//   delay(2000);
-//   resp = sendAT("AT+SAPBR=1,1", 10000);
-//   delay(500);
-//   String status = sendAT("AT+SAPBR=2,1", 3000);
-//   if (status.indexOf("1,1,") != -1) {
-//       Serial.println(" ✓ Terhubung (retry).");
-//       return true;
-//   }
-// 
-//   Serial.println(" ✗ Gagal.");
-//   return false;
-// }
-// 
-// /**
-//  * @brief Closes the active GPRS data connection.
-//  */
-// void closeGPRS() {
-//   sendAT("AT+SAPBR=0,1", 3000);
-//   Serial.println("[GPRS] Koneksi ditutup.");
-// }
-
 // =============================================================================
-// FIREBASE REST API (via SIM800L HTTPS)
+// FIREBASE REST API (via WiFi HTTPS)
 // =============================================================================
 
 /**
@@ -693,122 +519,6 @@ bool sendFirebaseHTTP(const String &path, const String &json, int method) {
 
   return false;
 }
-
-// /**
-//  * @brief Sends a PUT request to Firebase RTDB (overwrites data at path).
-//  * Used for the /live endpoint.
-//  *
-//  * SIM800L AT+HTTPACTION hanya support: 0=GET, 1=POST, 2=HEAD.
-//  * Tidak ada native PUT. Firebase REST API memperlakukan POST ke path
-//  * sebagai push (auto-key), KECUALI path diakhiri dengan node spesifik.
-//  * Workaround: gunakan HTTPACTION=1 (POST) tapi bedakan di path.
-//  * Untuk /live, Firebase Rules bisa di-set agar POST = overwrite,
-//  * atau gunakan Firebase Legacy REST dengan ?x-http-method-override=PUT.
-//  *
-//  * Solusi terbaik: tambahkan header X-HTTP-Method-Override
-//  */
-// // bool sendFirebasePUT(const String &path, const String &json) {
-// //   return sendFirebaseHTTP(path, json, 1);  // method=1: gunakan header override PUT
-// // }
-// 
-// /**
-//  * @brief Sends a POST request to Firebase RTDB (appends new node at path).
-//  * Used for the /history endpoint.
-//  */
-// // bool sendFirebasePOST(const String &path, const String &json) {
-// //   return sendFirebaseHTTP(path, json, 2);  // method=2: POST biasa
-// // }
-// 
-// /**
-//  * @brief Core HTTP request handler using SIM800L's built-in HTTP stack.
-//  * @param path Firebase RTDB path (e.g., "/smart_buoy/live")
-//  * @param json JSON payload string
-//  * @param method 1 = PUT, 2 = POST
-//  * @return true if HTTP 200 response received
-//  */
-// // bool sendFirebaseHTTP(const String &path, const String &json, int method) {
-// //   // Build the full Firebase REST URL
-// //   String url = "https://";
-// //   url += FIREBASE_HOST;
-// //   url += path;
-// //   url += ".json?auth=";
-// //   url += FIREBASE_AUTH;
-// // 
-// //   // Initialize HTTP service
-// //   String resp = sendAT("AT+HTTPINIT", 3000);
-// //   if (resp.indexOf("OK") == -1) {
-// //     // HTTP might already be initialized, terminate and retry
-// //     sendAT("AT+HTTPTERM", 1000);
-// //     delay(500);
-// //     resp = sendAT("AT+HTTPINIT", 3000);
-// //     if (resp.indexOf("OK") == -1) return false;
-// //   }
-// // 
-// //   // Configure HTTP parameters
-// //   sendAT("AT+HTTPPARA=\"CID\",1");
-// //   sendAT("AT+HTTPPARA=\"URL\",\"" + url + "\"", 3000);
-// //   sendAT("AT+HTTPPARA=\"CONTENT\",\"application/json\"");
-// //   // Tambah header X-HTTP-Method-Override untuk PUT (SIM800L tidak support native PUT)
-// //   if (method == 1) {
-// //     sendAT("AT+HTTPPARA=\"USERDATA\",\"X-HTTP-Method-Override: PUT\\r\\n\"");
-// //   }
-// //   sendAT("AT+HTTPSSL=1");
-// // 
-// //   // Prepare data payload
-// //   int dataLen = json.length();
-// //   String dataCmd = "AT+HTTPDATA=" + String(dataLen) + ",10000";
-// //   resp = sendAT(dataCmd, 5000);
-// // 
-// //   if (resp.indexOf("DOWNLOAD") != -1) {
-// //     // SIM800L is ready to receive data
-// //     sim800.print(json);
-// //     delay(1000);
-// //     waitForResponse("OK", 5000);
-// //   } else {
-// //     sendAT("AT+HTTPTERM", 1000);
-// //     return false;
-// //   }
-// // 
-// //   // Execute HTTP action
-// //   // For PUT: SIM800L doesn't have native PUT, we use method 1 (GET-like workaround)
-// //   // Firebase REST API: PUT = write, POST = push
-// //   // SIM800L AT+HTTPACTION: 0=GET, 1=POST, 2=HEAD
-// //   // Since SIM800L only supports GET/POST/HEAD, we use POST for both
-// //   // Firebase treats POST as push (generates unique key) and PUT as set
-// //   // Workaround: For PUT, append .json to path — Firebase REST API
-// //   // Actually, we'll use HTTPACTION=1 (POST) for both, but handle path differently
-// //   
-// //   resp = sendAT("AT+HTTPACTION=1", 15000);  // POST request
-// // 
-// //   // Wait for +HTTPACTION response with status code
-// //   delay(2000);
-// //   
-// //   // Read any pending response
-// //   String actionResp = "";
-// //   unsigned long start = millis();
-// //   while (millis() - start < 10000) {
-// //     while (sim800.available()) {
-// //       char c = sim800.read();
-// //       actionResp += c;
-// //     }
-// //     if (actionResp.indexOf("+HTTPACTION:") != -1) break;
-// //     delay(100);
-// //   }
-// // 
-// //   // Parse HTTP status code from +HTTPACTION: <method>,<status>,<datalen>
-// //   bool success = false;
-// //   if (actionResp.indexOf("200") != -1 || actionResp.indexOf("201") != -1) {
-// //     success = true;
-// //   } else {
-// //     Serial.printf("[HTTP] Response: %s\n", actionResp.c_str());
-// //   }
-// // 
-// //   // Terminate HTTP session
-// //   sendAT("AT+HTTPTERM", 1000);
-// // 
-// //   return success;
-// // }
-
 // =============================================================================
 // NETWORK TIMESTAMP (via NTP)
 // =============================================================================
@@ -852,113 +562,3 @@ uint64_t getNetworkTimestamp() {
   Serial.println("[Time] ⚠ NTP belum sync — gunakan estimasi.");
   return (uint64_t)bootCount * (SLEEP_DURATION_US / 1000ULL);
 }
-
-// // =============================================================================
-// // NETWORK TIMESTAMP (via SIM800L)
-// // =============================================================================
-// 
-// /**
-//  * @brief Retrieves Unix timestamp from SIM800L's network time.
-//  * Falls back to boot count estimation if network time unavailable.
-//  * @return Unix epoch timestamp (unsigned long)
-//  */
-// // unsigned long getNetworkTimestamp() {
-// //   // Request network time from SIM800L
-// //   // AT+CCLK? returns +CCLK: "yy/MM/dd,HH:mm:ss±zz"
-// //   String resp = sendAT("AT+CCLK?", 2000);
-// // 
-// //   int idx = resp.indexOf("+CCLK: \"");
-// //   if (idx != -1) {
-// //     // Parse the time string: "yy/MM/dd,HH:mm:ss+zz"
-// //     String timeStr = resp.substring(idx + 8);
-// //     int endIdx = timeStr.indexOf("\"");
-// //     if (endIdx != -1) {
-// //       timeStr = timeStr.substring(0, endIdx);
-// // 
-// //       // Parse components: yy/MM/dd,HH:mm:ss
-// //       int year   = timeStr.substring(0, 2).toInt() + 2000;
-// //       int month  = timeStr.substring(3, 5).toInt();
-// //       int day    = timeStr.substring(6, 8).toInt();
-// //       int hour   = timeStr.substring(9, 11).toInt();
-// //       int minute = timeStr.substring(12, 14).toInt();
-// //       int second = timeStr.substring(15, 17).toInt();
-// // 
-// //       // Convert to Unix timestamp using struct tm
-// //       struct tm t;
-// //       t.tm_year = year - 1900;
-// //       t.tm_mon  = month - 1;
-// //       t.tm_mday = day;
-// //       t.tm_hour = hour;
-// //       t.tm_min  = minute;
-// //       t.tm_sec  = second;
-// //       t.tm_isdst = 0;
-// // 
-// //       unsigned long ts = mktime(&t);
-// //       if (ts > 1600000000) {  // Sanity check: after Sep 2020
-// //         return ts;
-// //       }
-// //     }
-// //   }
-// // 
-// //   // Fallback: estimate based on boot count (2 minutes per boot)
-// //   Serial.println("[Time] ⚠ Gagal mendapatkan waktu jaringan — gunakan estimasi.");
-// //   return (unsigned long)(bootCount * (SLEEP_DURATION_US / 1000000ULL));
-// // }
-// 
-// // =============================================================================
-// // AT COMMAND UTILITIES
-// // =============================================================================
-// 
-// /**
-//  * @brief Sends an AT command to SIM800L and returns the response.
-//  * @param cmd The AT command string to send.
-//  * @param timeoutMs Maximum time to wait for response (default: 2000ms).
-//  * @return Full response string from the modem.
-//  */
-// // String sendAT(const String &cmd, unsigned long timeoutMs) {
-// //   // Flush any pending data
-// //   while (sim800.available()) sim800.read();
-// // 
-// //   sim800.println(cmd);
-// // 
-// //   String response = "";
-// //   unsigned long start = millis();
-// // 
-// //   while (millis() - start < timeoutMs) {
-// //     while (sim800.available()) {
-// //       char c = sim800.read();
-// //       response += c;
-// //     }
-// //     // Check for terminal responses
-// //     if (response.indexOf("OK") != -1 ||
-// //         response.indexOf("ERROR") != -1 ||
-// //         response.indexOf("DOWNLOAD") != -1) {
-// //       break;
-// //     }
-// //     delay(10);
-// //   }
-// // 
-// //   return response;
-// // }
-// 
-// /**
-//  * @brief Waits for a specific response string from SIM800L.
-//  * @param expected The expected substring in the response.
-//  * @param timeoutMs Maximum time to wait.
-//  * @return true if expected string found within timeout.
-//  */
-// // bool waitForResponse(const String &expected, unsigned long timeoutMs) {
-// //   String response = "";
-// //   unsigned long start = millis();
-// // 
-// //   while (millis() - start < timeoutMs) {
-// //     while (sim800.available()) {
-// //       char c = sim800.read();
-// //       response += c;
-// //     }
-// //     if (response.indexOf(expected) != -1) return true;
-// //     delay(10);
-// //   }
-// // 
-// //   return false;
-// // }

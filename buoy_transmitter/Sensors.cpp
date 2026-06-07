@@ -22,10 +22,16 @@
 #include <OneWire.h>
 #include <DallasTemperature.h>
 #include <Preferences.h>  // ESP32 NVS (Non-Volatile Storage) for calibration persistence
+#include <Wire.h>
+#include <Adafruit_ADS1X15.h>  // ADC eksternal 16-bit untuk turbidity
 
 // DS18B20 Temperature Sensor Instance
 OneWire oneWire(TEMP_PIN);
 DallasTemperature sensors(&oneWire);
+
+// ADS1115 — ADC eksternal 16-bit (I2C) untuk turbidity
+Adafruit_ADS1115 ads;
+bool adsReady = false;  ///< true bila ADS1115 terdeteksi di bus I2C
 
 // NVS Storage Handle
 Preferences preferences;
@@ -45,12 +51,15 @@ bool  cal7Set     = false;  ///< Flag: pH 6.86 point captured
 const float PH_REF_4 = 4.01f;
 const float PH_REF_7 = 6.86f;
 
-// ── Turbidity Calibration (2-Point, HARDCODED) ──────────────────────────────────
+// ── Turbidity Calibration (2-Point, HARDCODED) — dibaca via ADS1115 ─────────────
 // SEN0189: turbiditas naik => voltase turun. Garis: (V_CLEAR, 0 NTU) → (V_TURBID, MAX).
-// TURB_V_CLEAR sengaja di atas batas ADC (3.45 V) agar air sangat jernih tidak
-// "flat" mentok di 0 NTU — lihat catatan kalibrasi untuk jurnal.
-const float TURB_V_CLEAR  = 3.45f;   ///< Voltage pada 0 NTU (air jernih)
-const float TURB_V_TURBID = 2.26f;   ///< Voltage pada TURB_NTU_MAX (air keruh)
+// PENTING: nilai di bawah ini masih dari ADC internal lama (saturasi 3.3V). ADS1115
+// membaca tegangan ASLI (bisa >3.3V), jadi WAJIB DIUKUR ULANG:
+//   1) celup probe di air jernih → ketik TURBV di Serial → catat V → isi TURB_V_CLEAR
+//   2) celup di air keruh 400 NTU → TURBV → catat V → isi TURB_V_TURBID
+//   3) re-flash. (Lihat NOTE_KALIBRASI.md)
+const float TURB_V_CLEAR  = 3.45f;   ///< Voltage pada 0 NTU (air jernih)  — UKUR ULANG
+const float TURB_V_TURBID = 2.26f;   ///< Voltage pada TURB_NTU_MAX (keruh) — UKUR ULANG
 const float TURB_NTU_MAX  = 400.0f;  ///< NTU pada titik keruh
 
 // ── ADC Sampling Configuration ────────────────────────────────────────────────
@@ -63,9 +72,20 @@ const int   ADC_SAMPLE_DELAY_MS = 10; ///< Delay between consecutive ADC samples
 // ──────────────────────────────────────────────────────────────────────────────
 
 void initSensors() {
-  // Configure ESP32 ADC attenuation for the 0-3.3V measurement range
+  // Configure ESP32 ADC attenuation for the 0-3.3V measurement range (pH masih ADC internal)
   analogSetAttenuation(ADC_11db);
   sensors.begin();
+
+  // ── ADS1115 (ADC eksternal untuk turbidity) ──
+  Wire.begin(I2C_SDA, I2C_SCL);
+  adsReady = ads.begin(ADS1115_ADDR);
+  if (adsReady) {
+    // ±6.144V → bisa baca s/d ~5V (turbidity di-supply 5V). 1 LSB ≈ 0.1875 mV.
+    ads.setGain(GAIN_TWOTHIRDS);
+    Serial.println("[ADS1115] ✓ Terdeteksi — turbidity dibaca via ADC eksternal (A0)");
+  } else {
+    Serial.println("[ADS1115] ✗ TIDAK terdeteksi — cek wiring I2C (SDA21/SCL22/VDD 5V/ADDR→GND)");
+  }
 }
 
 void loadCalibration() {
@@ -133,6 +153,42 @@ static float readTrimmedMeanVoltage(int pin) {
   return avgAdc * (3.3f / 4095.0f);
 }
 
+/**
+ * @brief Trimmed-mean voltase turbidity dari ADS1115 (kanal TURB_ADS_CHANNEL).
+ *        Sama prinsipnya dengan readTrimmedMeanVoltage tapi sumbernya ADC eksternal
+ *        16-bit (bisa baca >3.3V). computeVolts() sudah memperhitungkan gain.
+ * @return Voltase tersaring (float). -1.0f bila ADS1115 tidak siap.
+ */
+static float readTurbidityVoltageADS() {
+  if (!adsReady) return -1.0f;
+
+  float samples[ADC_SAMPLES];
+  for (int i = 0; i < ADC_SAMPLES; i++) {
+    int16_t raw = ads.readADC_SingleEnded(TURB_ADS_CHANNEL);
+    samples[i]  = ads.computeVolts(raw);
+    delay(ADC_SAMPLE_DELAY_MS);
+  }
+
+  // Insertion sort (N kecil)
+  for (int i = 1; i < ADC_SAMPLES; i++) {
+    float key = samples[i];
+    int j = i - 1;
+    while (j >= 0 && samples[j] > key) {
+      samples[j + 1] = samples[j];
+      j--;
+    }
+    samples[j + 1] = key;
+  }
+
+  // Rata-rata bagian tengah (buang ADC_TRIM_COUNT di tiap ujung)
+  float sum = 0.0f;
+  int validCount = ADC_SAMPLES - (2 * ADC_TRIM_COUNT);
+  for (int i = ADC_TRIM_COUNT; i < ADC_SAMPLES - ADC_TRIM_COUNT; i++) {
+    sum += samples[i];
+  }
+  return sum / validCount;
+}
+
 // ──────────────────────────────────────────────────────────────────────────────
 // pH Sensor Reading
 // ──────────────────────────────────────────────────────────────────────────────
@@ -191,7 +247,8 @@ float readTemperature() {
 // SEN0189: makin keruh, voltase makin turun → slope m negatif.
 
 float readTurbidityNTU() {
-  float voltage = readTrimmedMeanVoltage(TURB_PIN);
+  float voltage = readTurbidityVoltageADS();
+  if (voltage < 0.0f) return -1.0f;  // ADS1115 tidak siap → tandai fault (-1 NTU)
 
   // m = ΔNTU / ΔV  (negatif karena voltase turun saat NTU naik)
   float m   = TURB_NTU_MAX / (TURB_V_TURBID - TURB_V_CLEAR);
@@ -283,6 +340,21 @@ void handleCalibrationCommand(String cmd) {
     Serial.println("║  Sistem menggunakan 2-Point Linear.  ║");
     Serial.println("╚══════════════════════════════════════╝");
 
+  // ── TURBV: Baca tegangan turbidity dari ADS1115 (untuk re-kalibrasi) ──
+  } else if (cmd == "TURBV") {
+    float v = readTurbidityVoltageADS();
+    if (v < 0.0f) {
+      Serial.println("\n  ✗ ADS1115 tidak siap — cek wiring I2C.");
+    } else {
+      Serial.println("\n╔══════════════════════════════════════╗");
+      Serial.println("║   KALIBRASI TURBIDITY (ADS1115)      ║");
+      Serial.println("╚══════════════════════════════════════╝");
+      Serial.printf("  Tegangan (A%d) = %.4f V\n", TURB_ADS_CHANNEL, v);
+      Serial.printf("  NTU saat ini  = %.1f\n", readTurbidityNTU());
+      Serial.println("  → Air JERNIH : catat V ini ke TURB_V_CLEAR");
+      Serial.println("  → Air 400 NTU: catat V ini ke TURB_V_TURBID, lalu re-flash.");
+    }
+
   // ── CALINFO: Display current calibration status ──
   } else if (cmd == "CALINFO") {
     Serial.println("\n═══════════════════════════════════════");
@@ -299,8 +371,9 @@ void handleCalibrationCommand(String cmd) {
     if (cal4Set) Serial.printf("  V(pH4_temp) = %.4f V\n", cal4Voltage);
     if (cal7Set) Serial.printf("  V(pH7_temp) = %.4f V\n", cal7Voltage);
     Serial.println("═══════════════════════════════════════");
-    Serial.println("  pH:   CAL4 | CAL7 | CALSAVE");
-    Serial.println("  Info: CALINFO");
+    Serial.println("  pH:        CAL4 | CAL7 | CALSAVE");
+    Serial.println("  Turbidity: TURBV  (baca V untuk re-kalibrasi)");
+    Serial.println("  Info:      CALINFO");
     Serial.println("═══════════════════════════════════════");
   }
 }
