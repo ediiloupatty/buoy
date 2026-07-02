@@ -69,9 +69,19 @@ int           lastRssi     = 0;      // RSSI paket LoRa terakhir (dBm)
 unsigned long lastPacketMs = 0;      // millis() saat paket LoRa terakhir diterima (0 = belum ada)
 unsigned long packetCount  = 0;      // total paket valid yang diterima sejak boot
 
+// ── Status aktuator (di-overhear dari paket CMD buoy → aktuator) ─────────────
+// Gateway tidak memerintah; ia hanya MENDENGAR perintah buoy yang lewat udara
+// agar bisa menampilkan status pompa cooling & dispenser kapur ke web/Firebase.
+bool          actCoolPump   = false;  // desired state pompa cooling (1/0) dari buoy
+uint32_t      actDoseId     = 0;      // doseId kapur terkini yang terdengar
+unsigned long actLastDoseMs = 0;      // millis() saat doseId terakhir naik (0 = belum)
+unsigned long actLastCmdMs  = 0;      // millis() paket CMD terakhir terdengar (0 = belum)
+
 // ── Forward declarations ─────────────────────────────────────────────────────
 bool   initLoRa();
 void   handlePacket(const String &msg);
+void   handleCommandOverheard(const String &msg);
+bool   sendControlStatus(const String &tsStr);
 String getTurbidityStatus(float ntuValue);
 
 bool   initWiFi();
@@ -128,7 +138,10 @@ void loop() {
     msg.trim();
     lastRssi = LoRa.packetRssi();
     Serial.printf("[LoRa RX] ← %s (RSSI %d dBm)\n", msg.c_str(), lastRssi);
-    handlePacket(msg);
+
+    // Router: paket perintah (CMD|...) vs paket sensor (SB|...)
+    if (msg.startsWith(LORA_CMD_PREFIX "|")) handleCommandOverheard(msg);
+    else                                     handlePacket(msg);
   }
 
   // ── 2. Layani permintaan halaman web (monitoring) ───────────────────────────
@@ -235,6 +248,53 @@ void handlePacket(const String &msg) {
 }
 
 /**
+ * @brief Parse paket perintah "CMD|dst|v1|v2|seq" yang dipancarkan buoy ke
+ *        node aktuator. Gateway hanya MENDENGAR (tidak memerintah) untuk
+ *        monitoring: update status + dorong ke /smart_buoy/control.
+ *
+ *   dst 'P' (pompa): v1 = state(1/0)
+ *   dst 'K' (kapur): v1 = doseId  (naik = ada dosis baru)
+ */
+void handleCommandOverheard(const String &msg) {
+  const int N = 5;
+  String parts[N];
+  int idx = 0, start = 0;
+  for (int i = 0; i <= (int)msg.length() && idx < N; i++) {
+    if (i == (int)msg.length() || msg.charAt(i) == '|') {
+      parts[idx++] = msg.substring(start, i);
+      start = i + 1;
+    }
+  }
+  if (idx != N) {
+    Serial.println("[CMD RX] ⚠ Paket perintah tidak lengkap — diabaikan.");
+    return;
+  }
+
+  lastPacketMs = millis();   // paket valid juga menandakan link hidup
+  actLastCmdMs = millis();
+  char dst = parts[1].length() ? parts[1].charAt(0) : '?';
+
+  if (dst == CMD_DST_PUMP) {
+    actCoolPump = (parts[2].toInt() != 0);
+  } else if (dst == CMD_DST_KAPUR) {
+    uint32_t newDose = strtoul(parts[2].c_str(), nullptr, 10);
+    if (newDose > actDoseId) {           // doseId naik = ada tabur kapur baru
+      actDoseId     = newDose;
+      actLastDoseMs = millis();
+      Serial.printf("[CMD RX] Dosis kapur baru terdeteksi → doseId=%lu\n",
+                    (unsigned long)actDoseId);
+    } else {
+      actDoseId = newDose;
+    }
+  } else {
+    Serial.printf("[CMD RX] ⚠ Tujuan tidak dikenal: '%c'\n", dst);
+    return;
+  }
+
+  if (WiFi.status() == WL_CONNECTED) sendControlStatus(getTimestampString());
+}
+
+/**
  * @brief Label kualitatif kejernihan dari NTU (mirror Sensors.cpp di buoy).
  */
 String getTurbidityStatus(float ntuValue) {
@@ -322,6 +382,16 @@ bool sendPumpStatus(const String &tsStr) {
                 ",\"debugMode\":" + String(debugMode) +
                 ",\"ts\":" + tsStr + "}";
   return sendFirebasePUT("/smart_buoy/pump_status", json);
+}
+
+/** @brief /smart_buoy/control (PUT). Status aktuator hasil overhear paket CMD. */
+bool sendControlStatus(const String &tsStr) {
+  String json = "{\"coolPump\":\"" + String(actCoolPump ? "ON" : "OFF") + "\"" +
+                ",\"doseId\":" + String((unsigned long)actDoseId) +
+                ",\"ts\":" + tsStr + "}";
+  bool ok = sendFirebasePUT("/smart_buoy/control", json);
+  Serial.println(ok ? "[Firebase Control] ✓ Terkirim" : "[Firebase Control] ✗ Gagal");
+  return ok;
 }
 
 // =============================================================================
@@ -473,6 +543,11 @@ void handleData() {
   j += ",\"pump\":\"";    j += pumpLabel; j += "\"";
   j += ",\"phaseMs\":";   j += String(pumpPhaseMs);
   j += ",\"debug\":";     j += String(debugMode);
+  // Status aktuator (overhear dari paket CMD buoy)
+  long doseAge = (actLastDoseMs == 0) ? -1 : (long)(millis() - actLastDoseMs);
+  j += ",\"coolPump\":\"";j += (actCoolPump ? "ON" : "OFF"); j += "\"";
+  j += ",\"doseId\":";    j += String((unsigned long)actDoseId);
+  j += ",\"doseAgeMs\":"; j += String(doseAge);
   j += ",\"ip\":\"";      j += WiFi.localIP().toString(); j += "\"";
   j += "}";
   server.send(200, "application/json", j);
@@ -522,7 +597,9 @@ void handleRoot() {
   </div>
 
   <div class="meta">
-    Status Pompa: <span class="pill" id="pump">--</span><br>
+    Pompa sampling (buoy): <span class="pill" id="pump">--</span><br>
+    Pompa cooling (suhu): <span class="pill" id="coolPump">--</span><br>
+    Dispenser kapur: <span class="pill" id="dose">--</span><br>
     RSSI: <span id="rssi">--</span> dBm &nbsp;•&nbsp; Total paket: <span id="packets">0</span><br>
     Update terakhir: <span id="age">--</span><br>
     IP ESP32: <span id="ip">--</span>
@@ -547,6 +624,10 @@ async function tick(){
     turb.innerHTML=d.turb+'<span class="unit"> NTU</span>'; kondisi.textContent=d.kondisi;
     pump.textContent=d.pump; rssi.textContent=d.rssi; packets.textContent=d.packets; ip.textContent=d.ip;
     age.textContent = d.ageMs<0 ? 'belum ada' : (Math.round(d.ageMs/1000)+' detik lalu');
+    // Aktuator
+    coolPump.textContent = d.coolPump;
+    dose.textContent = d.doseAgeMs<0 ? ('siaga (0 dosis)')
+                       : ('dosis #'+d.doseId+' • '+Math.round(d.doseAgeMs/1000)+' detik lalu');
   }catch(e){
     setStatus(linkStatus,linkText,'bad','✗ Gagal mengambil data dari ESP');
   }
