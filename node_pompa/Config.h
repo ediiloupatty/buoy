@@ -28,13 +28,15 @@
 /* =================================================================
  * PIN Relay pompa cooling
  * =================================================================
- * Modul relay China umumnya active-LOW. Untuk mencegah relay "klik ON"
- * sekejap saat boot, beri pull-up eksternal 10kΩ ke 3V3 pada jalur IN,
- * dan kode meng-OFF-kan relay paling awal di setup().
+ * Modul relay ini ternyata ACTIVE-HIGH (IN diberi HIGH → relay nyala) — terbukti
+ * dari uji: state ON justru mematikan pompa saat masih active-LOW. Untuk mencegah
+ * relay "klik ON" sekejap saat boot, beri pull-DOWN eksternal 10kΩ ke GND pada
+ * jalur IN, dan kode meng-OFF-kan relay paling awal di setup().
+ * (Kalau ganti modul yang active-LOW, tukar balik RELAY_ON/RELAY_OFF di bawah.)
  */
 #define RELAY_PIN   4    ///< D2 (GPIO4) → IN relay
-#define RELAY_ON    LOW
-#define RELAY_OFF   HIGH
+#define RELAY_ON    HIGH ///< modul active-HIGH: HIGH = pompa nyala
+#define RELAY_OFF   LOW
 
 /* =================================================================
  * LED indikator link (LED biru bawaan board, active-LOW)

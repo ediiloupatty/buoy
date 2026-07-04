@@ -70,6 +70,16 @@ void loop() {
     msg.trim();
     handleCommand(msg);
   }
+
+  // Cek input serial untuk pengujian lokal
+  if (Serial.available() > 0) {
+    char c = Serial.read();
+    if (c == 'k' || c == 'K') {
+      Serial.println("[Serial] Karakter 'k' diterima -> Menjalankan servo (1000 ms)...");
+      runDose(1000);
+    }
+  }
+
   delay(10);
 }
 
