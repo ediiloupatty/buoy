@@ -73,6 +73,19 @@ void loop() {
     handleCommand(msg);
   }
 
+  // Cek input serial untuk pengujian lokal
+  if (Serial.available() > 0) {
+    char c = Serial.read();
+    if (c == 't' || c == 'T') {
+      bool newState = !relayState;
+      Serial.printf("[Serial] Karakter '%c' diterima -> Toggle relay pompa: %s\n", c, newState ? "ON" : "OFF");
+      setRelay(newState);
+      if (newState) {
+        lastCmdMs = millis(); // Reset fail-safe timer agar tidak langsung mati jika sebelumnya pernah menerima LoRa
+      }
+    }
+  }
+
   // 2. Fail-safe: link putus → matikan pompa
   if (lastCmdMs != 0 && (millis() - lastCmdMs > ACT_FAILSAFE_MS)) {
     if (relayState) {

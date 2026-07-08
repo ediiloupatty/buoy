@@ -66,6 +66,29 @@ bool          everDosed    = false;  ///< sudah pernah dosis? (agar dosis pertam
 int           dosesToday   = 0;      ///< jumlah dosis dalam jendela 24 jam berjalan
 unsigned long dayWindowMs  = 0;      ///< awal jendela 24 jam (millis)
 
+// ── MODE SIMULASI DEMO (dipicu perintah serial "si") ─────────────────────────
+// Menjalankan skenario terskrip agar demo di aplikasi pasti terlihat: suhu naik
+// → pompa nyala, lalu pH turun → kapur ditabur → pH pulih. Aktuator diperintah
+// LANGSUNG (bukan lewat evaluateControl) supaya tidak bergantung ambang/histeresis.
+bool          simActive    = false;  ///< true = skenario demo sedang berjalan
+int           simStep      = 0;      ///< langkah skenario saat ini (0..6)
+unsigned long simStepStart = 0;      ///< millis() saat langkah ini dimulai
+unsigned long simLastTx    = 0;      ///< millis() TX SB|L terakhir saat simulasi
+unsigned long simLastCmd   = 0;      ///< millis() broadcast CMD aktuator terakhir
+
+// Durasi & nilai simulasi (buoy-only; tidak ditaruh di Config.h bersama node lain)
+#define SIM_SEG_MS          60000UL  ///< 1 menit per segmen skenario
+#define SIM_GAP_MS         120000UL  ///< 2 menit transisi suhu → pH
+// SB|L (suhu/pH) SERING agar app cepat update; CMD aktuator JARANG (state tak
+// berubah dalam 1 langkah) agar tidak berebut kanal & bikin SB|L terlewat.
+#define SIM_LIVE_TX_MS       3000UL  ///< kirim SB|L (suhu/pH) tiap 3 detik
+#define SIM_CMD_TX_MS       20000UL  ///< segarkan CMD pompa/kapur tiap 20 detik
+#define SIM_TEMP_NORMAL      31.0f   ///< suhu aman (app: 26–32°C = Aman)
+#define SIM_TEMP_HOT         32.5f   ///< suhu panas: >32°C (Bahaya) & ≥ TEMP_PUMP_ON_C, lonjakan kecil (+1,5°C)
+#define SIM_PH_NORMAL         7.9f   ///< pH aman (app: 7,5–8,5 = Aman)
+#define SIM_PH_LOW            7.1f   ///< pH turun: <7,5 (Bahaya) & ≤ PH_DOSE_BELOW
+#define SIM_TURB_NORMAL      20.0f   ///< kekeruhan stabil (Jernih/Aman)
+
 // ── Forward declarations ─────────────────────────────────────────────────────
 void applyPumpRelay(int state);
 unsigned long getPumpStateDuration(int state);
@@ -76,6 +99,12 @@ bool initLoRa();
 void sendLoRaPacket(char type);
 void evaluateControl();
 void sendActuatorCommands();
+void startSimulation();
+void serviceSimulation();
+void finishSimulation();
+void simSendLive();
+void simForcePump(bool on);
+void simForceDose();
 
 // =============================================================================
 // SETUP
@@ -145,10 +174,19 @@ void loop() {
   unsigned long now     = millis();
   unsigned long elapsed = now - stateStartedAt;
 
-  // ── 0. Perintah kalibrasi via Serial (CAL4/CAL7/CALSAVE/TURBV/CALINFO) ───────
+  // ── 0. Perintah via Serial: "si" = mulai simulasi demo, sisanya = kalibrasi ──
   if (Serial.available()) {
     String cmd = Serial.readStringUntil('\n');
-    handleCalibrationCommand(cmd);
+    cmd.trim();
+    if (cmd.equalsIgnoreCase("si")) startSimulation();
+    else                            handleCalibrationCommand(cmd);
+  }
+
+  // ── 0b. Mode simulasi demo aktif → ambil alih, lewati siklus pompa normal ────
+  if (simActive) {
+    serviceSimulation();
+    delay(50);
+    return;
   }
 
   // ── 1. Transisi fase pompa ──────────────────────────────────────────────────
@@ -386,5 +424,145 @@ const char* pumpStateLabel(int state) {
     case PUMP_DRAINING: return "DRAINING";
     case PUMP_IDLE:
     default:            return "IDLE";
+  }
+}
+
+// =============================================================================
+// MODE SIMULASI DEMO — perintah serial "si"
+// =============================================================================
+//
+// Skenario terskrip (total ±7 menit), tiap segmen 1 menit kecuali transisi 2 menit:
+//   Langkah 1 (60 dtk) : Suhu NORMAL (31°C)            → app: suhu Aman
+//   Langkah 2 (60 dtk) : Suhu PANAS (32,5°C) + POMPA ON→ app: suhu Bahaya, pompa nyala
+//   Langkah 3 (120 dtk): Suhu pulih normal, pompa OFF  → app: normal (transisi suhu→pH)
+//   Langkah 4 (60 dtk) : pH NORMAL (7,9)               → app: pH Aman
+//   Langkah 5 (60 dtk) : pH TURUN (7,1) + TABUR KAPUR  → app: pH Bahaya, kapur ditabur
+//   Langkah 6 (60 dtk) : pH NAIK bertahap → normal     → app: pH kembali Aman
+//   Selesai            : semua parameter NORMAL, kembali ke operasi biasa
+//
+// Aktuator (pompa & kapur) DIPERINTAH LANGSUNG, bukan lewat evaluateControl, agar
+// pasti jalan tanpa bergantung ambang suhu/pH atau histeresis.
+
+/** @brief Kirim SB|L dengan nilai simulasi terkini → update /live di aplikasi. */
+void simSendLive() {
+  sendLoRaPacket('L');
+}
+
+/** @brief Broadcast perintah aktuator 2× (andal lawan paket hilang) & catat waktunya. */
+void simBroadcastCmd() {
+  sendActuatorCommands();
+  delay(150);              // beri jeda agar receiver selesai proses paket pertama
+  sendActuatorCommands();
+  simLastCmd = millis();
+}
+
+/** @brief Paksa state pompa cooling (tanpa evaluateControl) & broadcast CMD|P. */
+void simForcePump(bool on) {
+  coolPumpOn = on;
+  simBroadcastCmd();       // CMD|P pakai coolPumpOn baru; CMD|K (doseId tetap) di-dedup node
+  Serial.printf("[SIM] Pompa cooling dipaksa %s\n", on ? "ON" : "OFF");
+}
+
+/** @brief Paksa 1 dosis kapur (tanpa evaluateControl): naikkan doseId & broadcast CMD|K. */
+void simForceDose() {
+  doseId++;
+  dosePrefs.begin("dose", false);
+  dosePrefs.putUInt("id", doseId);
+  dosePrefs.end();
+  simBroadcastCmd();       // CMD|K doseId naik → node_kapur menabur 1 dosis
+  Serial.printf("[SIM] Kapur dipaksa tabur → doseId=%lu\n", (unsigned long)doseId);
+}
+
+/** @brief Mulai / reset skenario simulasi demo. */
+void startSimulation() {
+  simActive    = true;
+  simStep      = 1;
+  simStepStart = millis();
+  simLastTx    = 0;
+
+  Serial.println("\n╔════════════════════════════════════════════╗");
+  Serial.println("║   MODE SIMULASI DEMO DIMULAI (perintah si)  ║");
+  Serial.println("╚════════════════════════════════════════════╝");
+  Serial.println("[SIM] Langkah 1/6: Suhu NORMAL (60 dtk)");
+
+  // Kondisi awal: semua normal, pompa OFF.
+  tempC     = SIM_TEMP_NORMAL;
+  phValue   = SIM_PH_NORMAL;
+  turbidity = SIM_TURB_NORMAL;
+  simForcePump(false);
+  simSendLive();
+}
+
+/** @brief Bereskan simulasi: kembalikan semua ke normal & aman, lanjut operasi biasa. */
+void finishSimulation() {
+  tempC     = SIM_TEMP_NORMAL;
+  phValue   = SIM_PH_NORMAL;
+  turbidity = SIM_TURB_NORMAL;
+  simForcePump(false);   // pastikan pompa OFF
+  simSendLive();         // kirim status normal terakhir
+  simActive = false;
+  Serial.println("[SIM] ✓ Simulasi selesai — semua parameter NORMAL. Kembali ke operasi biasa.");
+}
+
+/** @brief State machine skenario demo (dipanggil tiap loop saat simActive). */
+void serviceSimulation() {
+  unsigned long now     = millis();
+  unsigned long elapsed = now - simStepStart;
+  unsigned long dur     = (simStep == 3) ? SIM_GAP_MS : SIM_SEG_MS;
+
+  // ── Transisi ke langkah berikutnya ──
+  if (elapsed >= dur) {
+    simStep++;
+    simStepStart = now;
+    simLastTx    = 0;   // paksa TX segera di langkah baru
+
+    switch (simStep) {
+      case 2:  // Suhu panas + pompa ON
+        Serial.println("[SIM] Langkah 2/6: Suhu PANAS 32,5°C (>32) → POMPA ON (60 dtk)");
+        tempC = SIM_TEMP_HOT;
+        simForcePump(true);
+        break;
+      case 3:  // Transisi: pulih normal, pompa OFF (2 menit)
+        Serial.println("[SIM] Langkah 3/6: Suhu pulih NORMAL, pompa OFF — transisi (120 dtk)");
+        tempC   = SIM_TEMP_NORMAL;
+        phValue = SIM_PH_NORMAL;
+        simForcePump(false);
+        break;
+      case 4:  // pH normal
+        Serial.println("[SIM] Langkah 4/6: pH NORMAL 7,9 (60 dtk)");
+        phValue = SIM_PH_NORMAL;
+        break;
+      case 5:  // pH turun + tabur kapur
+        Serial.println("[SIM] Langkah 5/6: pH TURUN 7,1 (<7,5) → TABUR KAPUR (60 dtk)");
+        phValue = SIM_PH_LOW;
+        simForceDose();
+        break;
+      case 6:  // pH naik bertahap (dilakukan di badan langkah)
+        Serial.println("[SIM] Langkah 6/6: pH NAIK pulih normal (60 dtk)");
+        break;
+      default: // selesai
+        finishSimulation();
+        return;
+    }
+    simSendLive();  // kirim segera saat masuk langkah baru
+    return;
+  }
+
+  // ── Langkah 6: naikkan pH bertahap dari LOW → NORMAL (efek kapur mulai bekerja) ──
+  if (simStep == 6) {
+    float frac = (float)elapsed / (float)SIM_SEG_MS;         // 0..1
+    phValue = SIM_PH_LOW + (SIM_PH_NORMAL - SIM_PH_LOW) * frac;
+  }
+
+  // ── SB|L (suhu/pH) SERING → /live di app cepat update mengikuti nilai simulasi ──
+  if (simLastTx == 0 || (now - simLastTx >= SIM_LIVE_TX_MS)) {
+    simLastTx = now;
+    simSendLive();
+  }
+
+  // ── CMD aktuator JARANG (state tak berubah dalam 1 langkah) → tak berebut dgn SB|L ──
+  if (now - simLastCmd >= SIM_CMD_TX_MS) {
+    sendActuatorCommands();  // segarkan CMD|P (pompa) & CMD|K (dedup) lawan paket hilang
+    simLastCmd = now;
   }
 }

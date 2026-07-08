@@ -27,29 +27,34 @@ void setup() {
   LoRa.enableCrc();
 
   Serial.println("[LoRa] ✓ TX Siap.");
-  Serial.println("\n[INFO] Alat ini akan mengirim sinyal otomatis setiap 5 detik");
-  Serial.println("mengganti status Relay Pompa antara ON dan OFF bergantian.\n");
+  Serial.println("\n[INFO] Cara penggunaan:");
+  Serial.println("Ketik huruf 't' lalu tekan Enter di Serial Monitor");
+  Serial.println("untuk mengubah status Relay Pompa (ON/OFF) via LoRa.\n");
 }
 
 void loop() {
-  pumpState = !pumpState; // Ganti state dari OFF ke ON, atau sebaliknya
-  int stateVal = pumpState ? 1 : 0;
-  
-  // Format payload: CMD|P|<state>|0|<seq>
-  String payload = String(LORA_CMD_PREFIX) + "|" + 
-                   CMD_DST_PUMP + "|" + 
-                   stateVal + "|0|" + 
-                   seq;
-  
-  Serial.print(">> Mengirim LoRa (Pompa " + String(pumpState ? "ON" : "OFF") + "): ");
-  Serial.println(payload);
+  if (Serial.available() > 0) {
+    char c = Serial.read();
+    if (c == 't' || c == 'T') {
+      pumpState = !pumpState; // Ganti state dari OFF ke ON, atau sebaliknya
+      int stateVal = pumpState ? 1 : 0;
+      
+      // Format payload: CMD|P|<state>|0|<seq>
+      String payload = String(LORA_CMD_PREFIX) + "|" + 
+                       CMD_DST_PUMP + "|" + 
+                       stateVal + "|0|" + 
+                       seq;
+      
+      Serial.printf("[Serial] Karakter '%c' diterima -> Mengirim LoRa (Pompa %s): %s\n", c, pumpState ? "ON" : "OFF", payload.c_str());
 
-  LoRa.beginPacket();
-  LoRa.print(payload);
-  LoRa.endPacket();
-  
-  Serial.println(">> Terkirim!");
-  
-  seq++;
-  delay(5000); // Jeda 5 detik
+      LoRa.beginPacket();
+      LoRa.print(payload);
+      LoRa.endPacket();
+      
+      Serial.println(">> Terkirim!");
+      
+      seq++;
+    }
+  }
+  delay(10);
 }

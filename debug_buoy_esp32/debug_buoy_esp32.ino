@@ -32,9 +32,13 @@
  *   s → tampilkan status (sensor sim + keputusan)
  *   h → paksa suhu PANAS sekejap (uji pompa ON tanpa menunggu gelombang)
  *   c → paksa suhu DINGIN sekejap (uji pompa OFF)
+ *   e → DEBUG: paksa pompa cooling ON SEKARANG (relay aktif, abaikan histeresis)
  *   k → DEBUG: paksa 1 dosis kapur SEKARANG (servo gerak, abaikan cooldown)
  *   p → paksa pH RENDAH sekejap (uji dosis kapur, pakai cooldown spt buoy asli)
  *   f → bekukan / lanjutkan gelombang simulasi (freeze)
+ *   1 → DEBUG: toggle pompa sampling 1 (ISI, lokal di buoy — bukan lewat LoRa)
+ *   2 → DEBUG: toggle pompa sampling 2 (BUANG, lokal di buoy — bukan lewat LoRa)
+ *       (1 & 2 interlock persis seperti applyPumpRelay() buoy asli: tak pernah ON bareng)
  *
  * Board: "ESP32 Dev Module".  Library: LoRa (Sandeep Mistry).
  */
@@ -65,6 +69,10 @@ unsigned long dayWindowMs  = 0;      ///< awal jendela 24 jam (millis)
 // ── Simulasi ─────────────────────────────────────────────────────────────────
 uint32_t      seq          = 0;      ///< penghitung kirim, naik per paket (spt buoy)
 bool          simFrozen    = false;  ///< true = gelombang berhenti (nilai ditahan)
+
+// ── Pompa sampling LOKAL (ISI/BUANG) — relay langsung, bukan lewat LoRa ──────
+bool          pompaFillOn  = false;  ///< pompa 1 (ISI) sedang ON?
+bool          pompaDrainOn = false;  ///< pompa 2 (BUANG) sedang ON?
 long          tempForceMs  = 0;      ///< sisa waktu override suhu (h/c)
 long          phForceMs    = 0;      ///< sisa waktu override pH (p)
 float         tempForceVal = 0;
@@ -96,6 +104,12 @@ void setup() {
     Serial.println("[LoRa] ✗ Init GAGAL — cek wiring modul. Perintah TX di-skip.");
   }
 
+  // Pompa sampling lokal (ISI/BUANG) — mulai OFF, sama seperti buoy asli di setup.
+  pinMode(PUMP_FILL_PIN,  OUTPUT);
+  pinMode(PUMP_DRAIN_PIN, OUTPUT);
+  digitalWrite(PUMP_FILL_PIN,  RELAY_OFF);
+  digitalWrite(PUMP_DRAIN_PIN, RELAY_OFF);
+
   // Muat doseId dari NVS — persis buoy asli, supaya reboot tidak me-reset
   // acuan dosis di node_kapur.
   dosePrefs.begin("dose", true);  // read-only
@@ -108,7 +122,7 @@ void setup() {
                   (unsigned long)doseId);
   }
 
-  Serial.println("\n[INFO] Perintah Serial: s=status  h=panas  c=dingin  k=tabur kapur  p=pH rendah  f=freeze");
+  Serial.println("\n[INFO] Perintah Serial: s=status  h=panas  c=dingin  e=paksa pompa ON  k=tabur kapur  p=pH rendah  f=freeze  1/2=pompa sampling ISI/BUANG");
   Serial.printf("[INFO] Ambang: pompa ON≥%.1f°C / OFF≤%.1f°C | kapur pH≤%.1f | cooldown %lus\n\n",
                 TEMP_PUMP_ON_C, TEMP_PUMP_OFF_C, PH_DOSE_BELOW,
                 DOSE_COOLDOWN_MS / 1000UL);
@@ -285,6 +299,14 @@ void handleSerial() {
       tempForceMs  = 10000;
       Serial.printf("[Sim] Paksa suhu DINGIN %.1f°C selama 10 dtk.\n", tempForceVal);
       break;
+    case 'e': case 'E': {                     // DEBUG: paksa pompa cooling ON SEKARANG
+      // Set langsung state pompa, abaikan histeresis suhu — murni untuk
+      // menguji "apakah ESP32 ↔ node pompa nyambung": relay harus aktif.
+      coolPumpOn = true;
+      Serial.println("[Debug] Paksa pompa cooling ON (abaikan histeresis) → relay harus aktif.");
+      sendPumpCommand();   // kirim paket pompa DULUAN & sendiri → respons tercepat
+      break;
+    }
     case 'k': case 'K': {                     // DEBUG: paksa 1 dosis kapur SEKARANG
       // Naikkan doseId langsung, abaikan cooldown & batas harian — murni untuk
       // menguji "apakah ESP32 ↔ node kapur nyambung": servo harus buka-tutup.
@@ -308,8 +330,34 @@ void handleSerial() {
       simFrozen = !simFrozen;
       Serial.printf("[Sim] Gelombang %s.\n", simFrozen ? "DIBEKUKAN" : "dilanjutkan");
       break;
+    case '1': {                               // DEBUG: toggle pompa sampling 1 (ISI)
+      pompaFillOn = !pompaFillOn;
+      if (pompaFillOn) {
+        pompaDrainOn = false;                 // interlock: pompa 2 wajib OFF dulu
+        digitalWrite(PUMP_DRAIN_PIN, RELAY_OFF);
+        digitalWrite(PUMP_FILL_PIN,  RELAY_ON);
+        Serial.println("[Debug] Pompa 1 (ISI) ON — relay aktif. (Pompa 2 dipaksa OFF, interlock)");
+      } else {
+        digitalWrite(PUMP_FILL_PIN, RELAY_OFF);
+        Serial.println("[Debug] Pompa 1 (ISI) OFF.");
+      }
+      break;
+    }
+    case '2': {                               // DEBUG: toggle pompa sampling 2 (BUANG)
+      pompaDrainOn = !pompaDrainOn;
+      if (pompaDrainOn) {
+        pompaFillOn = false;                  // interlock: pompa 1 wajib OFF dulu
+        digitalWrite(PUMP_FILL_PIN,  RELAY_OFF);
+        digitalWrite(PUMP_DRAIN_PIN, RELAY_ON);
+        Serial.println("[Debug] Pompa 2 (BUANG) ON — relay aktif. (Pompa 1 dipaksa OFF, interlock)");
+      } else {
+        digitalWrite(PUMP_DRAIN_PIN, RELAY_OFF);
+        Serial.println("[Debug] Pompa 2 (BUANG) OFF.");
+      }
+      break;
+    }
     default:
-      Serial.println("[Sim] ⚠ Perintah tak dikenal (pakai s/h/c/k/p/f).");
+      Serial.println("[Sim] ⚠ Perintah tak dikenal (pakai s/h/c/e/k/p/f/1/2).");
       break;
   }
 }
@@ -320,6 +368,8 @@ void printStatus() {
                 tempC, TEMP_PUMP_ON_C, TEMP_PUMP_OFF_C);
   Serial.printf("  pH sim     : %.2f    (dosis bila ≤%.1f)\n", phValue, PH_DOSE_BELOW);
   Serial.printf("  Pompa cool : %s\n", coolPumpOn ? "ON" : "OFF");
+  Serial.printf("  Pompa 1 ISI: %s   Pompa 2 BUANG: %s\n",
+                pompaFillOn ? "ON" : "OFF", pompaDrainOn ? "ON" : "OFF");
   Serial.printf("  doseId     : %lu  (hari ini %d/%d)\n",
                 (unsigned long)doseId, dosesToday, DOSE_MAX_PER_DAY);
   Serial.printf("  Gelombang  : %s\n", simFrozen ? "FREEZE" : "jalan");
