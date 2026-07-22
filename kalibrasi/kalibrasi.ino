@@ -7,7 +7,7 @@
 
 /**
  * @file kalibrasi.ino
- * @brief Standalone pH Sensor Calibration Tool with LCD I2C 16x2.
+ * @brief Standalone pH Sensor Calibration Tool (output via Serial).
  * 
  * Perintah Serial:
  *   CAL4    — Catat tegangan di buffer pH 4.01
@@ -25,13 +25,8 @@
  */
 
 #include <Preferences.h>
-#include <LiquidCrystal_I2C.h>
 #include <OneWire.h>
 #include <DallasTemperature.h>
-
-// ── LCD I2C (SDA=21, SCL=22) ─────────────────────────────────────────────────
-// Ganti 0x27 ke 0x3F jika LCD tidak muncul
-LiquidCrystal_I2C lcd(0x27, 16, 2);
 
 // ── Pin ──────────────────────────────────────────────────────────────────────
 #define PH_PIN   34
@@ -82,25 +77,6 @@ bool continuousRead = true;
 const float EMA_ALPHA = 0.1f;   // 0.1=sangat halus, 0.5=lebih responsif
 float smoothedVolt     = -1.0f; // pH: -1 = belum ada pembacaan valid
 float smoothedTurbVolt = -1.0f; // turbidity: -1 = belum ada pembacaan valid
-
-// =============================================================================
-// LCD Helpers
-// =============================================================================
-
-void lcdPrint(const char* line1, const char* line2) {
-  lcd.clear();
-  lcd.setCursor(0, 0); lcd.print(line1);
-  lcd.setCursor(0, 1); lcd.print(line2);
-}
-
-void lcdStatus(const char* line1, float voltage) {
-  char buf[17];
-  lcd.clear();
-  lcd.setCursor(0, 0); lcd.print(line1);
-  lcd.setCursor(0, 1);
-  snprintf(buf, sizeof(buf), "V=%.4fV OK", voltage);
-  lcd.print(buf);
-}
 
 // =============================================================================
 // ADC — filter floating midpoint (~1.65V / ADC 2047)
@@ -239,7 +215,6 @@ void runDiagnostic(int pin, const char* label, bool isPH) {
   Serial.println("║   DIAGNOSA STRAY VOLTAGE — 8 detik   ║");
   Serial.println("╚══════════════════════════════════════╝");
   Serial.printf ("  Sensor: %s  | Sampel ADC MENTAH (tanpa filter)\n", label);
-  lcdPrint("DIAGNOSA 8s...", label);
 
   long   n = 0;
   double sum = 0, sumSq = 0;
@@ -358,14 +333,6 @@ void runDiagnostic(int pin, const char* label, bool isPH) {
   Serial.println("     kalau angka balik normal, sumbernya kincir/pompa.");
   Serial.println("═══════════════════════════════════════════════════\n");
 
-  char line1[17], line2[17];
-  if (isPH) snprintf(line1, sizeof(line1), "pH:%.2f %.3fV", computePH(meanV), meanV);
-  else      snprintf(line1, sizeof(line1), "NTU:%.0f %.2fV", computeNTU(meanV), meanV);
-  snprintf(line2, sizeof(line2), "p2p%.2f sd%.2f", p2pV, stdV);
-  lcd.clear();
-  lcd.setCursor(0, 0); lcd.print(line1);
-  lcd.setCursor(0, 1); lcd.print(line2);
-
   delay(5000);
   lastReadMillis = millis();
 }
@@ -382,42 +349,36 @@ void handleCommand(String cmd) {
     Serial.println("\n╔══════════════════════════════════════╗");
     Serial.println("║   KALIBRASI pH 4.01 — Sampling...    ║");
     Serial.println("╚══════════════════════════════════════╝");
-    lcdPrint("CAL4 pH4.01", "Sampling...");
-
     cal4Voltage = readVoltageCalibration(PH_PIN, 10000);
     if (cal4Voltage < 0) {
       Serial.println("  ✗ ERROR: Sinyal floating. Cek koneksi probe!");
-      lcdPrint("CAL4 GAGAL", "Cek koneksi!"); return;
+      return;
     }
     cal4Set = true;
     Serial.printf("  ✓ Tegangan: %.4f V (ADC ~%d)\n", cal4Voltage, (int)(cal4Voltage / 3.3f * 4095.0f));
     Serial.println("  → Lanjut: celupkan ke pH 6.86, ketik CAL7");
-    lcdStatus("CAL4 OK", cal4Voltage);
 
   } else if (cmd == "CAL7") {
     Serial.println("\n╔══════════════════════════════════════╗");
     Serial.println("║   KALIBRASI pH 6.86 — Sampling...    ║");
     Serial.println("╚══════════════════════════════════════╝");
-    lcdPrint("CAL7 pH6.86", "Sampling...");
-
     cal7Voltage = readVoltageCalibration(PH_PIN, 10000);
     if (cal7Voltage < 0) {
       Serial.println("  ✗ ERROR: Sinyal floating. Cek koneksi probe!");
-      lcdPrint("CAL7 GAGAL", "Cek koneksi!"); return;
+      return;
     }
     cal7Set = true;
     Serial.printf("  ✓ Tegangan: %.4f V (ADC ~%d)\n", cal7Voltage, (int)(cal7Voltage / 3.3f * 4095.0f));
     Serial.println("  → Lanjut: ketik CALSAVE");
-    lcdStatus("CAL7 OK", cal7Voltage);
 
   } else if (cmd == "CALSAVE") {
     if (!cal4Set || !cal7Set) {
       Serial.println("\n  ✗ Jalankan CAL4 dan CAL7 terlebih dahulu!");
-      lcdPrint("ERROR CALSAVE", "Ambil CAL4 & CAL7"); return;
+      return;
     }
     if (abs(cal7Voltage - cal4Voltage) < 0.001f) {
       Serial.println("\n  ✗ Tegangan antar buffer terlalu mirip!");
-      lcdPrint("ERROR: V mirip", "Ulangi kalibrasi"); return;
+      return;
     }
 
     preferences.begin("ph_cal", false);
@@ -434,7 +395,6 @@ void handleCommand(String cmd) {
     Serial.printf("║  V(pH4.01) = %.4f V                 ║\n", calV4);
     Serial.printf("║  V(pH6.86) = %.4f V                 ║\n", calV7);
     Serial.println("╚══════════════════════════════════════╝");
-    lcdPrint("SAVED ke NVS!", "Upload FW utama");
 
   } else if (cmd.startsWith("CAL1 ")) {
     // ── Kalibrasi 1-Titik (single-point) ─────────────────────────────────
@@ -446,24 +406,22 @@ void handleCommand(String cmd) {
     if (refPH < 0.5f || refPH > 13.5f) {
       Serial.println("\n  ✗ pH referensi tidak valid. Isi 0.5 - 13.5.");
       Serial.println("    Contoh: CAL1 7.4");
-      lcdPrint("CAL1 GAGAL", "pH ref invalid"); return;
+      return;
     }
     if (abs(calV7 - calV4) < 0.001f) {
       Serial.println("\n  ✗ Slope kalibrasi lama tidak valid.");
       Serial.println("    Lakukan kalibrasi 2-titik (CAL4/CAL7) lebih dulu.");
-      lcdPrint("CAL1 GAGAL", "Slope invalid"); return;
+      return;
     }
 
     Serial.println("\n╔══════════════════════════════════════╗");
     Serial.println("║   KALIBRASI 1-TITIK — Sampling...    ║");
     Serial.println("╚══════════════════════════════════════╝");
-    char l1[17]; snprintf(l1, sizeof(l1), "CAL1 pH %.2f", refPH);
-    lcdPrint(l1, "Sampling...");
 
     float v = readVoltageCalibration(PH_PIN, 10000);
     if (v < 0) {
       Serial.println("  ✗ ERROR: Sinyal floating. Cek koneksi probe!");
-      lcdPrint("CAL1 GAGAL", "Cek koneksi!"); return;
+      return;
     }
 
     // Slope lama (pH/V) & jarak voltase antar-anchor — keduanya dipertahankan.
@@ -492,9 +450,6 @@ void handleCommand(String cmd) {
     Serial.printf("  ✓ calV7 baru = %.4f V\n", newV7);
     Serial.println("  → Tersimpan ke NVS. Cek dengan READ, lalu upload FW utama.\n");
 
-    char l2[17]; snprintf(l2, sizeof(l2), "pH%.2f V=%.2f", refPH, v);
-    lcdPrint("CAL1 SAVED!", l2);
-
   } else if (cmd == "CALINFO") {
     Serial.println("\n═══════════════════════════════════════");
     Serial.println("  STATUS KALIBRASI SENSOR");
@@ -508,17 +463,9 @@ void handleCommand(String cmd) {
     Serial.printf("  V(0   NTU) = %.4f V\n", TURB_V_CLEAR);
     Serial.printf("  V(%.0f NTU) = %.4f V\n", TURB_NTU_MAX, TURB_V_TURBID);
 
-    char buf[17];
-    lcd.clear();
-    snprintf(buf, sizeof(buf), "p4:%.2f p7:%.2f", calV4, calV7);
-    lcd.setCursor(0, 0); lcd.print(buf);
-    snprintf(buf, sizeof(buf), "Tb HC %.2f %.2f", TURB_V_CLEAR, TURB_V_TURBID);
-    lcd.setCursor(0, 1); lcd.print(buf);
-
   } else if (cmd == "TCAL0" || cmd == "TCAL70" || cmd == "TCAL400" || cmd == "TCALSAVE") {
     Serial.println("\n  ⚠ Kalibrasi turbidity di-hardcode di kalibrasi.ino.");
     Serial.println("    Ubah TURB_V_CLEAR / TURB_V_TURBID lalu re-flash untuk mengganti.");
-    lcdPrint("TURB hardcoded", "Edit + re-flash");
 
   } else if (cmd == "DIAGTURB") {
     runDiagnostic(TURB_PIN, "Turbidity", false);
@@ -526,7 +473,6 @@ void handleCommand(String cmd) {
   } else if (cmd == "READ") {
     continuousRead = !continuousRead;
     Serial.printf("[Read] %s\n", continuousRead ? "AKTIF" : "NONAKTIF");
-    if (!continuousRead) lcdPrint("pH Cal Tool", "Ketik perintah..");
 
   } else if (cmd == "DIAG" || cmd == "DIAGPH") {
     runDiagnostic(PH_PIN, "pH", true);
@@ -542,9 +488,7 @@ void handleCommand(String cmd) {
     Serial.println("╚══════════════════════════════════════╝");
 
     for (int i = 0; i < ERR_SAMPLES; i++) {
-      char lcdLine[17];
-      snprintf(lcdLine, sizeof(lcdLine), "UJI pH [%d/%d]", i + 1, ERR_SAMPLES);
-      lcdPrint(lcdLine, "Mengukur...");
+      Serial.printf("  [%d/%d] Mengukur...\n", i + 1, ERR_SAMPLES);
 
       // 15x readVoltage (masing-masing trimmed mean 50 sampel) lalu rata-ratakan
       const int N_AVG = 15;
@@ -560,7 +504,7 @@ void handleCommand(String cmd) {
 
     if (validCount < 3) {
       Serial.println("  ✗ Terlalu banyak NO SIGNAL. Cek koneksi probe!");
-      lcdPrint("ERR: NO SIGNAL", "Cek koneksi!"); return;
+      return;
     }
 
     float sum = 0;
@@ -591,13 +535,6 @@ void handleCommand(String cmd) {
     delay(5000);
     lastReadMillis = millis();
 
-    char line1[17], line2[17];
-    snprintf(line1, sizeof(line1), "pH:%.2f Ref:%.2f", avg, ref);
-    snprintf(line2, sizeof(line2), "Err:%.2f(%.1f%%)", absErr, relErr);
-    lcd.clear();
-    lcd.setCursor(0, 0); lcd.print(line1);
-    lcd.setCursor(0, 1); lcd.print(line2);
-
   } else if (cmd.startsWith("ERRTEMP ")) {
     float ref = cmd.substring(8).toFloat();
     float vals[ERR_SAMPLES];
@@ -609,9 +546,7 @@ void handleCommand(String cmd) {
     Serial.println("╚══════════════════════════════════════╝");
 
     for (int i = 0; i < ERR_SAMPLES; i++) {
-      char lcdLine[17];
-      snprintf(lcdLine, sizeof(lcdLine), "UJI SUHU [%d/%d]", i + 1, ERR_SAMPLES);
-      lcdPrint(lcdLine, "Membaca...");
+      Serial.printf("  [%d/%d] Membaca...\n", i + 1, ERR_SAMPLES);
       tempSensors.requestTemperatures();
       float v = tempSensors.getTempCByIndex(0);
       delay(200);
@@ -620,7 +555,7 @@ void handleCommand(String cmd) {
 
     if (validCount < 3) {
       Serial.println("  ✗ DS18B20 tidak terdeteksi. Cek koneksi!");
-      lcdPrint("ERR: NO DS18B20", "Cek koneksi!"); return;
+      return;
     }
 
     float sum = 0;
@@ -651,13 +586,6 @@ void handleCommand(String cmd) {
     delay(5000);
     lastReadMillis = millis();
 
-    char line1[17], line2[17];
-    snprintf(line1, sizeof(line1), "%.2fC Ref:%.1fC", avg, ref);
-    snprintf(line2, sizeof(line2), "Err:%.2fC(%.1f%%)", absErr, relErr);
-    lcd.clear();
-    lcd.setCursor(0, 0); lcd.print(line1);
-    lcd.setCursor(0, 1); lcd.print(line2);
-
   } else if (cmd.startsWith("ERRTURB ")) {
     float ref = cmd.substring(8).toFloat();
     float vals[ERR_SAMPLES];
@@ -669,9 +597,7 @@ void handleCommand(String cmd) {
     Serial.println("╚══════════════════════════════════════╝");
 
     for (int i = 0; i < ERR_SAMPLES; i++) {
-      char lcdLine[17];
-      snprintf(lcdLine, sizeof(lcdLine), "UJI TURB [%d/%d]", i + 1, ERR_SAMPLES);
-      lcdPrint(lcdLine, "Mengukur...");
+      Serial.printf("  [%d/%d] Mengukur...\n", i + 1, ERR_SAMPLES);
 
       const int N_AVG = 15;
       float vSum = 0;
@@ -686,7 +612,7 @@ void handleCommand(String cmd) {
 
     if (validCount < 3) {
       Serial.println("  ✗ Terlalu banyak NO SIGNAL. Cek koneksi sensor!");
-      lcdPrint("ERR: NO SIGNAL", "Cek koneksi!"); return;
+      return;
     }
 
     float sum = 0;
@@ -724,16 +650,6 @@ void handleCommand(String cmd) {
     delay(5000);
     lastReadMillis = millis();
 
-    char line1[17], line2[17];
-    snprintf(line1, sizeof(line1), "T:%.1f Ref:%.0f", avg, ref);
-    if (hasRef)
-      snprintf(line2, sizeof(line2), "Err:%.1f(%.1f%%)", absErr, (absErr/abs(ref))*100.0f);
-    else
-      snprintf(line2, sizeof(line2), "Offset:%.2fNTU", avg);
-    lcd.clear();
-    lcd.setCursor(0, 0); lcd.print(line1);
-    lcd.setCursor(0, 1); lcd.print(line2);
-
   } else if (cmd.length() > 0) {
     Serial.println("  Perintah tidak dikenal.");
     Serial.println("  pH:   CAL4 | CAL7 | CALSAVE | CAL1 <pH>");
@@ -741,7 +657,6 @@ void handleCommand(String cmd) {
     Serial.println("  Info: CALINFO | READ");
     Serial.println("  Uji Error: ERRPH <ref> | ERRTURB <ref> | ERRTEMP <ref>");
     Serial.println("  Diagnosa stray voltage: DIAG (pH) | DIAGTURB");
-    lcdPrint("Cmd tdk dikenal", "ERR?/CAL?/INFO?");
   }
 }
 
@@ -752,10 +667,6 @@ void handleCommand(String cmd) {
 void setup() {
   Serial.begin(115200);
   delay(100);
-
-  lcd.init();
-  lcd.backlight();
-  lcdPrint("pH Cal Tool", "Memuat...");
 
   analogSetAttenuation(ADC_11db);
   tempSensors.begin();
@@ -787,8 +698,6 @@ void setup() {
   Serial.println("║  ERRTURB <NTU> contoh: ERRTURB 0     ║");
   Serial.println("║  ERRTEMP <°C>  contoh: ERRTEMP 27.5  ║");
   Serial.println("╚══════════════════════════════════════╝\n");
-
-  lcdPrint("SmartBuoy Cal", "Ready...");
 }
 
 // =============================================================================
@@ -834,15 +743,6 @@ void loop() {
 
       Serial.printf("[READ] pH: %.2f (%.2fV) | Turb: %.1f NTU (%.2fV)\n",
                     ph, smoothedVolt, ntu, smoothedTurbVolt);
-
-      char line1[17], line2[17];
-      snprintf(line1, sizeof(line1), "pH:%.2f %.2fV", ph, smoothedVolt);
-      snprintf(line2, sizeof(line2), "TB:%.1f %.2fV", ntu, smoothedTurbVolt);
-      lcd.clear();
-      lcd.setCursor(0, 0); lcd.print(line1);
-      lcd.setCursor(0, 1); lcd.print(line2);
-    } else {
-      lcdPrint("Sensor Error", "Cek koneksi!");
     }
   }
 }

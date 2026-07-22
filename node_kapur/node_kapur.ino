@@ -148,13 +148,31 @@ void handleCommand(const String &msg) {
 }
 
 /**
- * @brief Gerakkan servo: BUKA (kecepatan penuh) → tahan openMs → TUTUP.
- *        write() langsung ke sudut target = servo bergerak secepat
- *        kemampuan fisik motornya (SG90 ±150 ms untuk 90°).
+ * @brief Sapu servo pelan-pelan dari sudut asal ke sudut tujuan
+ *        (SERVO_SWEEP_STEP_DEG per SERVO_SWEEP_STEP_MS), agar gerakan halus
+ *        dan lonjakan arus servo lebih kecil.
+ */
+void moveServoSlow(int fromDeg, int toDeg) {
+  int step = (toDeg >= fromDeg) ? SERVO_SWEEP_STEP_DEG : -SERVO_SWEEP_STEP_DEG;
+  int pos  = fromDeg;
+  while (pos != toDeg) {
+    pos += step;
+    if ((step > 0 && pos > toDeg) || (step < 0 && pos < toDeg)) pos = toDeg;
+    dispenser.write(pos);
+    delay(SERVO_SWEEP_STEP_MS);
+  }
+}
+
+/**
+ * @brief Gerakkan servo: BUKA pelan → tahan openMs → TUTUP pelan.
+ *        Catatan: fungsi ini blocking — selama dosis berjalan, paket LoRa
+ *        diabaikan (aman: re-broadcast doseId sama memang di-dedup).
  */
 void runDose(unsigned long openMs) {
-  dispenser.write(SERVO_OPEN_DEG);
+  Serial.printf("[Servo] Membuka pelan... lalu tahan %lu ms\n", openMs);
+  moveServoSlow(SERVO_CLOSED_DEG, SERVO_OPEN_DEG);
   delay(openMs);
-  dispenser.write(SERVO_CLOSED_DEG);
+  Serial.println("[Servo] Menutup pelan...");
+  moveServoSlow(SERVO_OPEN_DEG, SERVO_CLOSED_DEG);
   Serial.println("[Servo] ✓ Selesai menabur — hopper tertutup kembali.");
 }

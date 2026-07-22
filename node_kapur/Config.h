@@ -35,6 +35,11 @@
 #define SERVO_CLOSED_DEG  0    ///< posisi hopper TERTUTUP
 #define SERVO_OPEN_DEG    90   ///< posisi hopper TERBUKA (kalibrasi sesuai mekanik)
 
+// Kecepatan sapuan servo saat buka/tutup — makin besar STEP_MS makin pelan.
+// 1° per 40 ms ≈ 3,6 detik untuk 90° (dibanding gerak penuh SG90 ±150 ms).
+#define SERVO_SWEEP_STEP_DEG  1     ///< derajat per langkah sapuan
+#define SERVO_SWEEP_STEP_MS   40UL  ///< jeda antar langkah (ms)
+
 /* =================================================================
  * LORA PARAMETERS  ⚠ HARUS SAMA DI SEMUA NODE ⚠
  * ================================================================= */
@@ -52,6 +57,6 @@
  * Jaga-jaga bila openMs dari paket korup/terlalu besar → hopper tidak terkunci
  * terbuka berlama-lama. Clamp ke nilai ini.
  */
-#define DOSE_OPEN_MAX_MS  5000UL   ///< maksimum 5 detik per dosis
+#define DOSE_OPEN_MAX_MS  90000UL  ///< maksimum 90 detik per dosis (dosis normal 1 menit)
 
 #endif // CONFIG_H

@@ -66,7 +66,8 @@ bool          everDosed    = false;  ///< sudah pernah dosis? (agar dosis pertam
 int           dosesToday   = 0;      ///< jumlah dosis dalam jendela 24 jam berjalan
 unsigned long dayWindowMs  = 0;      ///< awal jendela 24 jam (millis)
 
-// ── MODE SIMULASI DEMO (dipicu perintah serial "si") ─────────────────────────
+// ── MODE SIMULASI DEMO (auto-start saat boot bila SIM_AUTOSTART=1, atau ──────
+// ── dipicu perintah serial "si") ─────────────────────────────────────────────
 // Menjalankan skenario terskrip agar demo di aplikasi pasti terlihat: suhu naik
 // → pompa nyala, lalu pH turun → kapur ditabur → pH pulih. Aktuator diperintah
 // LANGSUNG (bukan lewat evaluateControl) supaya tidak bergantung ambang/histeresis.
@@ -77,6 +78,7 @@ unsigned long simLastTx    = 0;      ///< millis() TX SB|L terakhir saat simulas
 unsigned long simLastCmd   = 0;      ///< millis() broadcast CMD aktuator terakhir
 
 // Durasi & nilai simulasi (buoy-only; tidak ditaruh di Config.h bersama node lain)
+#define SIM_AUTOSTART            0   ///< 1 = simulasi langsung jalan saat boot (debug); 0 = tunggu perintah "si"
 #define SIM_SEG_MS          60000UL  ///< 1 menit per segmen skenario
 #define SIM_GAP_MS         120000UL  ///< 2 menit transisi suhu → pH
 // SB|L (suhu/pH) SERING agar app cepat update; CMD aktuator JARANG (state tak
@@ -124,7 +126,13 @@ void setup() {
   // 2. Pompa — mulai langsung dari fase FILLING
   pinMode(PUMP_FILL_PIN,  OUTPUT);
   pinMode(PUMP_DRAIN_PIN, OUTPUT);
+#if SIM_AUTOSTART
+  // Simulasi auto-start mengambil alih loop() dan membekukan siklus pompa —
+  // mulai dari IDLE (kedua relay OFF) agar relay ISI tidak tertahan ON.
+  pumpState = PUMP_IDLE;
+#else
   pumpState = PUMP_FILLING;
+#endif
   applyPumpRelay(pumpState);
   Serial.printf("[Pump] Siklus mulai — fase awal: %s\n", currentPumpLabel());
 
@@ -162,6 +170,13 @@ void setup() {
   dayWindowMs = millis();
   evaluateControl();
   sendActuatorCommands();
+
+#if SIM_AUTOSTART
+  // 8. Langsung masuk mode simulasi demo tanpa menunggu perintah "si" (debug).
+  //    Setelah skenario selesai, firmware lanjut ke operasi normal; ketik "si"
+  //    di serial untuk mengulang simulasi.
+  startSimulation();
+#endif
 }
 
 // =============================================================================
